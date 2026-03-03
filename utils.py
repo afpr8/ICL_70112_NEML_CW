@@ -106,7 +106,41 @@ def metric(
 
 
 def compute_normalization_constant(
-    mu: torch.Tensor,
-    sigma: torch.Tensor
+    mu:torch.Tensor,
+    sigma:torch.Tensor,
+    metric_fn,
+    n_samples:int=3000 # LAND paper uses 3000 in all experiments
 ) -> torch.Tensor:
-    pass
+    """
+        Compute the multivariate normalization constant
+        Params:
+            mu (d,): 1D mean tensor
+            sigma (d,d): 2D covariance tensor
+            metric_fn: The 
+            n_samples (optional): The number of Monte Carlo samples to use
+        Returns:
+            C: The Monte Carlo estimate of the normalizatio constant
+    """
+    d = mu.shape[0]
+
+    Z = torch.sqrt((2 * torch.pi)**d * torch.det(sigma))
+    mvn = torch.distributions.MultivariateNormal(
+        loc=torch.zeros(d),
+        covariance_matrix=sigma
+    )
+    v_samples = mvn.sample((n_samples, ))
+    M_mu = metric_fn(mu)
+
+    vol_elements = []
+
+    for v in v_samples:
+        x = exp_map(mu, v, M_mu)
+        M_x = metric_fn(x)
+
+        diag_entries = torch.diag(M_x)
+        log_det = torch.sum(torch.log(diag_entries))
+        vol = torch.exp(0.5 * log_det)
+
+        vol_elements.append(vol)        
+
+    return Z * torch.stack(vol_elements).mean()
