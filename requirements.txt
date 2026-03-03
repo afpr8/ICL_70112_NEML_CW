@@ -1,2 +1,6 @@
+mne==1.11
+numpy==2.4
+scikit-learn==1.8
+scipy==1.17
 torch==2.10
 torchdiffeq==0.2
