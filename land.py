@@ -1,1 +1,230 @@
-# Sup
+import torch
+
+from utils import exp_map, log_map, compute_normalization_constant, metric
+
+
+class LANDMLE:
+    def __init__(
+        self,
+        lr_mu: float = 1e-3,
+        lr_A: float = 1e-3,
+        S: int = 100,
+        epsilon: float = 1e-3,
+    ):
+        """
+        Initialize the LAND model
+        Params:
+            lr_mu (float): The learning rate for mu
+            lr_A (float): The learning rate for A
+            S (int): The number of vectors sampled to estimate the exp_map part of the gradient
+            epsilon (float): The tolerance for the end condition
+        """
+        self.lr_mu = lr_mu
+        self.lr_A = lr_A
+        self.S = S
+        self.epsilon = epsilon
+
+    def fit(self, X: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Fit the LAND model to the data
+        Params:
+            X (torch.Tensor): The data to fit the model to
+        Returns:
+            mu (torch.Tensor): The mean of the distribution
+            sigma (torch.Tensor): The covariance of the distribution
+            normalization_constant (torch.Tensor): The normalization constant of the distribution
+        """
+        mu, A, sigma = self._init_params(X)
+        t = 0
+        normalization_constant = compute_normalization_constant(mu, sigma)
+        loss_diff = float("inf")
+
+        while loss_diff > self.epsilon:
+            # Store previous values
+            prev_mu = mu
+            prev_sigma = sigma
+            prev_normalization_constant = normalization_constant
+
+            # Update mu
+            grad_mu = self._compute_grad_mu(mu, sigma, X, normalization_constant)
+            mu = exp_map(mu, self.lr_mu * grad_mu)  # grad_mu already has the neg sign
+
+            # Update sigma
+            normalization_constant = compute_normalization_constant(mu, sigma)
+            grad_sigma = self._compute_grad_sigma(
+                mu, A, sigma, X, normalization_constant
+            )
+            A = A - self.lr_A * grad_sigma
+            sigma = torch.inverse(A.T @ A)  # TODO check if we can avoid inverse
+
+            # Update loss difference for stopping condition
+            normalization_constant = compute_normalization_constant(mu, sigma)
+            loss_diff = (
+                torch.linalg.norm(
+                    self.loss(mu, sigma, X, normalization_constant)
+                    - self.loss(prev_mu, prev_sigma, X, prev_normalization_constant)
+                )
+                ** 2
+            )
+            t += 1
+
+        return mu, sigma, normalization_constant
+
+    def _init_params(
+        self, X: torch.Tensor, method: str = "mean"
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Initialize the parameters of the model
+        Params:
+            X (torch.Tensor): The data to initialize the parameters with
+            method (str): The method to use for initialization.
+                - "random": Initialize mu randomly, sigma from data
+                - "mean": Initialize mu and sigma empirically from data
+                - "GMM": Initialize mu and sigma with a Gaussian Mixture Model
+        Returns:
+            mu (torch.Tensor): The mean of the distribution
+            A (torch.Tensor): The A matrix of the distribution
+            sigma (torch.Tensor): The covariance of the distribution
+        """
+        match method:
+            case "random":
+                mu = X[torch.randint(0, X.shape[0], (1,))]
+                sigma = torch.cov(X.T)
+            case "mean":
+                mu = torch.mean(X, dim=0)
+                sigma = torch.cov(X.T)
+            case "GMM":
+                raise NotImplementedError("GMM initialization is not implemented yet")
+            case _:
+                raise ValueError("Invalid method")
+
+        A = self._compute_A(sigma)
+        return mu, A, sigma
+
+    def loss(
+        self,
+        mu: torch.Tensor,
+        sigma: torch.Tensor,
+        X: torch.Tensor,
+        normalization_constant: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Compute the objective function
+        Params:
+            mu (torch.Tensor): The mean of the distribution
+            sigma (torch.Tensor): The covariance of the distribution
+            X (torch.Tensor): The data
+            normalization_constant (torch.Tensor): The normalization constant of the distribution
+        Returns:
+            torch.Tensor: The objective function
+        """
+        objective = 0
+        for x in X:
+            log_map_ = log_map(mu, x)
+            objective += (
+                log_map_ @ torch.linalg.inv(sigma) @ log_map_.T
+            )  # TODO cache inverse sigma?
+        objective /= 2 * X.shape[0]
+
+        objective += torch.log(normalization_constant)
+        return objective
+
+    def _compute_grad_mu(
+        self,
+        mu: torch.Tensor,
+        sigma: torch.Tensor,
+        X: torch.Tensor,
+        normalization_constant: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Compute the gradient of the log-likelihood with respect to mu
+        Params:
+            mu (torch.Tensor): The mean of the distribution
+            sigma (torch.Tensor): The covariance of the distribution
+            X (torch.Tensor): The data
+            normalization_constant (torch.Tensor): The normalization constant of the distribution
+        Returns:
+            torch.Tensor: The gradient of the log-likelihood with respect to mu
+        """
+        grad_mu = torch.zeros_like(mu)
+
+        # Compute log_map part of the gradient
+        for x in X:
+            grad_mu += log_map(mu, x)
+        grad_mu /= X.shape[0]
+
+        # Compute exp_map part of the gradient
+        dist = torch.distributions.MultivariateNormal(
+            torch.zeros_like(mu), covariance_matrix=sigma
+        )
+        for _ in range(self.S):
+            v = dist.sample()
+            grad_mu -= self._m(mu, v) * v
+
+        grad_mu *= torch.sqrt(
+            (2 * torch.pi) ** mu.shape[0] * torch.linalg.det(sigma)
+        ) / (self.S * normalization_constant)
+
+        return grad_mu
+
+    def _m(self, mu: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+        """
+        Compute the deformation of the metric at mu in the direction of v
+        Params:
+            mu (torch.Tensor): The mean of the distribution
+            v (torch.Tensor): The vector to compute the m function with
+        Returns:
+            torch.Tensor: The deformation of the metric at mu in the direction of v
+        """
+        return torch.sqrt(torch.linalg.det(metric(exp_map(mu, v))))
+
+    def _compute_grad_sigma(
+        self,
+        mu: torch.Tensor,
+        A: torch.Tensor,
+        sigma: torch.Tensor,
+        X: torch.Tensor,
+        normalization_constant: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Compute the gradient of the log-likelihood with respect to sigma
+        Params:
+            mu (torch.Tensor): The mean of the distribution
+            A (torch.Tensor): The A matrix of the distribution
+            sigma (torch.Tensor): The covariance of the distribution
+            X (torch.Tensor): The data
+            normalization_constant (torch.Tensor): The normalization constant of the distribution
+        Returns:
+            torch.Tensor: The gradient of the log-likelihood with respect to sigma
+        """
+        grad_sigma = torch.zeros_like(sigma)
+
+        # Compute log_map part of the gradient
+        for x in X:
+            log_map_ = log_map(mu, x)
+            grad_sigma += log_map_ @ log_map_.T
+        grad_sigma /= X.shape[0]
+
+        # Compute exp_map part of the gradient
+        dist = torch.distributions.MultivariateNormal(
+            torch.zeros_like(mu), covariance_matrix=sigma
+        )
+        for _ in range(self.S):
+            v = dist.sample()
+            grad_sigma -= self._m(mu, v) * v @ v.T
+
+        grad_sigma *= torch.sqrt(
+            (2 * torch.pi) ** mu.shape[0] * torch.linalg.det(sigma)
+        ) / (self.S * normalization_constant)
+
+        return grad_sigma
+
+    def _compute_A(self, sigma: torch.Tensor) -> torch.Tensor:
+        """
+        Compute the A matrix from the covariance matrix
+        Params:
+            sigma (torch.Tensor): The covariance of the distribution
+        Returns:
+            torch.Tensor: The A matrix of the distribution
+        """
+        return torch.linalg.cholesky(torch.linalg.inv(sigma))  # TODO store inverse
