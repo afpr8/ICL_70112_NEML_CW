@@ -195,7 +195,10 @@ def extract_subject_features(
 
 def apply_nmf(
         X:np.ndarray,
-        n_components:int=5 # LAND paper used 5
+        n_components:int=5, # LAND paper used 5
+        n_starts:int=10, # LAND paper uses 10 random starts
+        random_state=0,
+        max_iter=500
     ) -> np.ndarray:
     """
         Apply Non-Negative Matrix Factorization of feature data
@@ -205,14 +208,30 @@ def apply_nmf(
         Returns:
             coefficients: 2D array of component coefficients per sample
     """
-    nmf = NMF(
-        n_components=n_components,
-        init='random',
-        n_init=10, # LAND paper uses 10 random starts
-        random_state=0,
-        max_iter=500
-    )
-    return nmf.fit_transform(X)
+    best_coefficients = None
+    best_error = np.inf
+
+    rng = np.random.default_rng(random_state)
+
+    for i in range(n_starts):
+        nmf = NMF(
+            n_components=n_components,
+            init='random',
+            random_state=rng.integers(0, 1_000_000),
+            max_iter=max_iter
+        )
+    coefficients = nmf.fit_transform(X)
+    components = nmf.components_
+    reconstruction_error = np.linalg.norm(
+        X - coefficients @ components,
+        ord='fro'
+    ) # Frobenius norm
+
+    if reconstruction_error < best_error:
+        best_error = reconstruction_error
+        best_coefficients = coefficients
+
+    return best_coefficients
 
 
 def build_land_sleep_features(
