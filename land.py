@@ -13,6 +13,7 @@ class LANDMLE:
         epsilon: float = 1e-3,
         sigma: float = 1.0,
         rho: float = 1e-3,
+        init_method: str = "mean",
     ):
         """
         Initialize the LAND model
@@ -23,6 +24,10 @@ class LANDMLE:
             epsilon (float): The tolerance for the end condition
             sigma (float): Hyperparameter to compute the metric
             rho (float): Hyperparameter to compute the metric
+            init_method (str): The method to use for initialization.
+                - "random": Initialize mu randomly, sigma from empirical cov of tangent vectors.
+                - "mean": Initialize mu as the empirical mean, sigma from empirical cov of tangent vectors.
+                - "GMM": Initialize mu and sigma with a Gaussian Mixture Model.
         """
         self.lr_mu = lr_mu
         self.lr_A = lr_A
@@ -31,6 +36,8 @@ class LANDMLE:
 
         self.sigma = sigma
         self.rho = rho
+
+        self.init_method = init_method
 
         self._metric = None
 
@@ -46,7 +53,7 @@ class LANDMLE:
         """
         self._metric = partial(metric, X=X, sigma=self.sigma, rho=self.rho)
 
-        mu, A, sigma = self._init_params(X)
+        mu, A, sigma = self._init_params(X, self.init_method)
         t = 0
         normalization_constant = compute_normalization_constant(mu, sigma, self._metric)
         loss_diff = float("inf")
@@ -112,9 +119,9 @@ class LANDMLE:
         Params:
             X (torch.Tensor): The data to initialize the parameters with
             method (str): The method to use for initialization.
-                - "random": Initialize mu randomly, sigma from empirical cov of tangent vectors[cite: 519, 520].
-                - "mean": Initialize mu empirically, sigma from empirical cov of tangent vectors[cite: 523].
-                - "GMM": Initialize mu and sigma with a Gaussian Mixture Model[cite: 525, 526].
+                - "random": Initialize mu randomly, sigma from empirical cov of tangent vectors.
+                - "mean": Initialize mu as the empirical mean, sigma from empirical cov of tangent vectors.
+                - "GMM": Initialize mu and sigma with a Gaussian Mixture Model.
         Returns:
             mu (torch.Tensor): The mean of the distribution
             A (torch.Tensor): The A matrix of the distribution
@@ -126,9 +133,7 @@ class LANDMLE:
             case "mean":
                 mu = torch.mean(X, dim=0)
             case "GMM":
-                raise NotImplementedError(
-                    "GMM initialization is not implemented yet [cite: 525]"
-                )
+                raise NotImplementedError("GMM initialization is not implemented yet")
             case _:
                 raise ValueError("Invalid method")
 
