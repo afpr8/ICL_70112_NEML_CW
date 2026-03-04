@@ -1,3 +1,4 @@
+from functools import partial
 import torch
 
 from utils import exp_map, log_map, compute_normalization_constant, metric
@@ -10,6 +11,8 @@ class LANDMLE:
         lr_A: float = 1e-3,
         S: int = 100,
         epsilon: float = 1e-3,
+        sigma: float = 1.0,
+        rho: float = 1e-3,
     ):
         """
         Initialize the LAND model
@@ -18,11 +21,18 @@ class LANDMLE:
             lr_A (float): The learning rate for A
             S (int): The number of vectors sampled to estimate the exp_map part of the gradient
             epsilon (float): The tolerance for the end condition
+            sigma (float): Hyperparameter to compute the metric
+            rho (float): Hyperparameter to compute the metric
         """
         self.lr_mu = lr_mu
         self.lr_A = lr_A
         self.S = S
         self.epsilon = epsilon
+
+        self.sigma = sigma
+        self.rho = rho
+
+        self._metric = None
 
     def fit(self, X: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
@@ -34,9 +44,11 @@ class LANDMLE:
             sigma (torch.Tensor): The covariance of the distribution
             normalization_constant (torch.Tensor): The normalization constant of the distribution
         """
+        self._metric = partial(metric, X=X, sigma=self.sigma, rho=self.rho)
+
         mu, A, sigma = self._init_params(X)
         t = 0
-        normalization_constant = compute_normalization_constant(mu, sigma)
+        normalization_constant = compute_normalization_constant(mu, sigma, self._metric)
         loss_diff = float("inf")
 
         while loss_diff**2 > self.epsilon:
@@ -47,11 +59,15 @@ class LANDMLE:
 
             # Update mu
             grad_mu = self._compute_grad_mu(mu, sigma, X, normalization_constant)
-            mu = exp_map(mu, self.lr_mu * grad_mu, metric(mu, X))  # grad alr has the -
-            normalization_constant = compute_normalization_constant(mu, sigma)
+            mu = exp_map(
+                mu, self.lr_mu * grad_mu, self._metric(mu)
+            )  # grad_mu already has the -1 factor
+            normalization_constant = compute_normalization_constant(
+                mu, sigma, self._metric
+            )
 
             # Scale lr
-            loss_diff = self.loss(mu, sigma, X, normalization_constant) - self.loss(
+            loss_diff = self._loss(mu, sigma, X, normalization_constant) - self._loss(
                 prev_mu, prev_sigma, X, prev_normalization_constant
             )
             if loss_diff > 0:
@@ -65,10 +81,12 @@ class LANDMLE:
             )
             A = A - self.lr_A * grad_sigma
             sigma = torch.inverse(A.T @ A)  # TODO check if we can avoid inverse
-            normalization_constant = compute_normalization_constant(mu, sigma)
+            normalization_constant = compute_normalization_constant(
+                mu, sigma, self._metric
+            )
 
             # Scale lr
-            loss_diff = self.loss(mu, sigma, X, normalization_constant) - self.loss(
+            loss_diff = self._loss(mu, sigma, X, normalization_constant) - self._loss(
                 mu, prev_sigma, X, prev_normalization_constant
             )
             if loss_diff > 0:
@@ -77,11 +95,12 @@ class LANDMLE:
                 self.lr_A *= 1.1
 
             # Compute full loss diff for stopping condition
-            loss_diff = self.loss(mu, sigma, X, normalization_constant) - self.loss(
+            loss_diff = self._loss(mu, sigma, X, normalization_constant) - self._loss(
                 prev_mu, prev_sigma, X, prev_normalization_constant
             )
 
             t += 1
+        self._metric = None  # avoid memory leak
 
         return mu, sigma, normalization_constant
 
@@ -114,13 +133,13 @@ class LANDMLE:
                 raise ValueError("Invalid method")
 
         # Compute covariance from tangent vectors
-        tangent_vectors = torch.stack([log_map(mu, x, metric(mu, X)) for x in X])
+        tangent_vectors = torch.stack([log_map(mu, x, self._metric(mu)) for x in X])
         sigma = torch.cov(tangent_vectors.T)
 
-        A = self._compute_A(sigma)
+        A = self.compute_A(sigma)
         return mu, A, sigma
 
-    def loss(
+    def _loss(
         self,
         mu: torch.Tensor,
         sigma: torch.Tensor,
@@ -140,7 +159,7 @@ class LANDMLE:
         objective = 0
         inv_sigma = torch.linalg.inv(sigma)  # TODO cache inverse sigma?
         for x in X:
-            log_map_ = log_map(mu, x, metric(mu, X))
+            log_map_ = log_map(mu, x, self._metric(mu))
             objective += torch.dot(log_map_, inv_sigma @ log_map_)
 
         objective /= 2 * X.shape[0]
@@ -170,7 +189,7 @@ class LANDMLE:
 
         # Compute log_map part of the gradient
         for x in X:
-            grad_mu_log_map += log_map(mu, x, metric(mu, X))
+            grad_mu_log_map += log_map(mu, x, self._metric(mu))
         grad_mu_log_map /= X.shape[0]
 
         # Compute exp_map part of the gradient
@@ -197,9 +216,9 @@ class LANDMLE:
         Returns:
             torch.Tensor: The deformation of the metric at mu in the direction of v
         """
-        metric_mu = metric(mu, X)
+        metric_mu = self._metric(mu)
         translated_point = exp_map(mu, v, metric_mu)
-        metric_translated_point = metric(translated_point, X)
+        metric_translated_point = self._metric(translated_point)
         return torch.sqrt(torch.linalg.det(metric_translated_point))
 
     def _compute_grad_sigma(
@@ -226,7 +245,7 @@ class LANDMLE:
 
         # Compute log_map part of the gradient
         for x in X:
-            log_map_ = log_map(mu, x, metric(mu, X))
+            log_map_ = log_map(mu, x, self._metric(mu))
             grad_sigma_log_map += torch.outer(log_map_, log_map_)
         grad_sigma_log_map /= X.shape[0]
 
@@ -244,7 +263,7 @@ class LANDMLE:
 
         return A @ (grad_sigma_log_map + grad_sigma_exp_map)
 
-    def _compute_A(self, sigma: torch.Tensor) -> torch.Tensor:
+    def compute_A(self, sigma: torch.Tensor) -> torch.Tensor:
         """
         Compute the A matrix from the covariance matrix, A.T @ A = inv(sigma)
         Params:
