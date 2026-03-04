@@ -24,12 +24,19 @@ def tensor_cache(
     @wraps(func)
     def wrapper(*args: Any, **kwargs: Any) -> torch.Tensor:
         # Convert tensors to bytes to use as a cache key
-        key = tuple(
+        args_key = tuple(
             arg.detach().cpu().numpy().tobytes()
             if isinstance(arg, torch.Tensor)
             else arg
             for arg in args
-        ) + tuple(sorted(kwargs.items()))
+        )
+        kwargs_key = tuple(
+            (k, v.detach().cpu().numpy().tobytes()
+            if isinstance(v, torch.Tensor)
+            else v)
+            for k, v in sorted(kwargs.items())
+        )
+        key = args_key + kwargs_key
         if key not in cache:
             cache[key] = func(*args, **kwargs)
 
