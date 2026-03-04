@@ -106,7 +106,6 @@ def metric(
 
 
 def compute_normalization_constant(
-    mu: torch.Tensor,
-    sigma: torch.Tensor
+    mu: torch.Tensor, sigma: torch.Tensor, metric: callable, S: int
 ) -> torch.Tensor:
     pass
