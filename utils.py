@@ -1,6 +1,44 @@
+# Utilities file for reusable functions for LAND algorithms
+
+from functools import wraps
+from typing import Callable, Any
+
 import torch
 
 
+def tensor_cache(
+    func: Callable[..., torch.Tensor]
+) -> Callable[..., torch.Tensor]:
+    """
+    Decorator to cache function outputs for PyTorch tensor inputs
+    Converts tensor arguments to bytes for hashing
+    
+    Params:
+        func: A function that returns a torch.Tensor and takes tensor
+            (or non-tensor) arguments.
+    Returns:
+        wrapper: Cached version of the function
+    """
+    cache = {}
+    
+    @wraps(func)
+    def wrapper(*args: Any, **kwargs: Any) -> torch.Tensor:
+        # Convert tensors to bytes to use as a cache key
+        key = tuple(
+            arg.detach().cpu().numpy().tobytes()
+            if isinstance(arg, torch.Tensor)
+            else arg
+            for arg in args
+        ) + tuple(sorted(kwargs.items()))
+        if key not in cache:
+            cache[key] = func(*args, **kwargs)
+
+        return cache[key]
+
+    return wrapper
+
+
+@tensor_cache
 def exp_map(x:torch.Tensor, v:torch.Tensor, M_x:torch.Tensor) -> torch.Tensor:
     """
         The exponential map corresponding to the LAND metric implemented below
@@ -13,12 +51,12 @@ def exp_map(x:torch.Tensor, v:torch.Tensor, M_x:torch.Tensor) -> torch.Tensor:
                 from the tangent plane at x utilizing M_x
     """
     diag_sqrt_inv = torch.sqrt(torch.diag(M_x))**(-1)
-
     v_scaled = diag_sqrt_inv * v
 
     return x + v_scaled
 
 
+@tensor_cache
 def log_map(x:torch.Tensor, y:torch.Tensor, M_x:torch.Tensor) -> torch.Tensor:
     """
         The logarithmic map corresponding to the LAND metric implemented below
@@ -36,12 +74,7 @@ def log_map(x:torch.Tensor, y:torch.Tensor, M_x:torch.Tensor) -> torch.Tensor:
     return log_xy
 
 
-def compute_normalization_constant(
-    mu: torch.Tensor,
-    sigma: torch.Tensor
-) -> torch.Tensor:
-    pass
-
+@tensor_cache
 def metric(
     x:torch.Tensor,
     X:torch.Tensor,
@@ -70,3 +103,10 @@ def metric(
     M_x = torch.diag(1.0 / diag_entries) # Inversion of a diagonal matrix
 
     return M_x
+
+
+def compute_normalization_constant(
+    mu: torch.Tensor,
+    sigma: torch.Tensor
+) -> torch.Tensor:
+    pass
