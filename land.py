@@ -28,7 +28,7 @@ class LANDMLE:
         """
         Fit the LAND model to the data
         Params:
-            X (torch.Tensor): The data to fit the model to
+            X (torch.Tensor): The data to fit the model to, shape (N, D)
         Returns:
             mu (torch.Tensor): The mean of the distribution
             sigma (torch.Tensor): The covariance of the distribution
@@ -39,7 +39,7 @@ class LANDMLE:
         normalization_constant = compute_normalization_constant(mu, sigma)
         loss_diff = float("inf")
 
-        while loss_diff > self.epsilon:
+        while loss_diff**2 > self.epsilon:
             # Store previous values
             prev_mu = mu
             prev_sigma = sigma
@@ -48,24 +48,39 @@ class LANDMLE:
             # Update mu
             grad_mu = self._compute_grad_mu(mu, sigma, X, normalization_constant)
             mu = exp_map(mu, self.lr_mu * grad_mu)  # grad_mu already has the neg sign
+            normalization_constant = compute_normalization_constant(mu, sigma)
+
+            # Scale lr
+            loss_diff = self.loss(mu, sigma, X, normalization_constant) - self.loss(
+                prev_mu, prev_sigma, X, prev_normalization_constant
+            )
+            if loss_diff > 0:
+                self.lr_mu *= 0.75
+            else:
+                self.lr_mu *= 1.1
 
             # Update sigma
-            normalization_constant = compute_normalization_constant(mu, sigma)
             grad_sigma = self._compute_grad_sigma(
                 mu, A, sigma, X, normalization_constant
             )
             A = A - self.lr_A * grad_sigma
             sigma = torch.inverse(A.T @ A)  # TODO check if we can avoid inverse
-
-            # Update loss difference for stopping condition
             normalization_constant = compute_normalization_constant(mu, sigma)
-            loss_diff = (
-                torch.linalg.norm(
-                    self.loss(mu, sigma, X, normalization_constant)
-                    - self.loss(prev_mu, prev_sigma, X, prev_normalization_constant)
-                )
-                ** 2
+
+            # Scale lr
+            loss_diff = self.loss(mu, sigma, X, normalization_constant) - self.loss(
+                mu, prev_sigma, X, prev_normalization_constant
             )
+            if loss_diff > 0:
+                self.lr_A *= 0.75
+            else:
+                self.lr_A *= 1.1
+
+            # Compute full loss diff for stopping condition
+            loss_diff = self.loss(mu, sigma, X, normalization_constant) - self.loss(
+                prev_mu, prev_sigma, X, prev_normalization_constant
+            )
+
             t += 1
 
         return mu, sigma, normalization_constant
@@ -78,9 +93,9 @@ class LANDMLE:
         Params:
             X (torch.Tensor): The data to initialize the parameters with
             method (str): The method to use for initialization.
-                - "random": Initialize mu randomly, sigma from data
-                - "mean": Initialize mu and sigma empirically from data
-                - "GMM": Initialize mu and sigma with a Gaussian Mixture Model
+                - "random": Initialize mu randomly, sigma from empirical cov of tangent vectors[cite: 519, 520].
+                - "mean": Initialize mu empirically, sigma from empirical cov of tangent vectors[cite: 523].
+                - "GMM": Initialize mu and sigma with a Gaussian Mixture Model[cite: 525, 526].
         Returns:
             mu (torch.Tensor): The mean of the distribution
             A (torch.Tensor): The A matrix of the distribution
@@ -88,15 +103,19 @@ class LANDMLE:
         """
         match method:
             case "random":
-                mu = X[torch.randint(0, X.shape[0], (1,))]
-                sigma = torch.cov(X.T)
+                mu = X[torch.randint(0, X.shape[0], (1,))].squeeze()
             case "mean":
                 mu = torch.mean(X, dim=0)
-                sigma = torch.cov(X.T)
             case "GMM":
-                raise NotImplementedError("GMM initialization is not implemented yet")
+                raise NotImplementedError(
+                    "GMM initialization is not implemented yet [cite: 525]"
+                )
             case _:
                 raise ValueError("Invalid method")
+
+        # Compute covariance from tangent vectors
+        tangent_vectors = torch.stack([log_map(mu, x) for x in X])
+        sigma = torch.cov(tangent_vectors.T)
 
         A = self._compute_A(sigma)
         return mu, A, sigma
@@ -119,14 +138,14 @@ class LANDMLE:
             torch.Tensor: The objective function
         """
         objective = 0
+        inv_sigma = torch.linalg.inv(sigma)  # TODO cache inverse sigma?
         for x in X:
             log_map_ = log_map(mu, x)
-            objective += (
-                log_map_ @ torch.linalg.inv(sigma) @ log_map_.T
-            )  # TODO cache inverse sigma?
-        objective /= 2 * X.shape[0]
+            objective += torch.dot(log_map_, inv_sigma @ log_map_)
 
+        objective /= 2 * X.shape[0]
         objective += torch.log(normalization_constant)
+
         return objective
 
     def _compute_grad_mu(
@@ -146,12 +165,13 @@ class LANDMLE:
         Returns:
             torch.Tensor: The gradient of the log-likelihood with respect to mu
         """
-        grad_mu = torch.zeros_like(mu)
+        grad_mu_log_map = torch.zeros_like(mu)
+        grad_mu_exp_map = torch.zeros_like(mu)
 
         # Compute log_map part of the gradient
         for x in X:
-            grad_mu += log_map(mu, x)
-        grad_mu /= X.shape[0]
+            grad_mu_log_map += log_map(mu, x)
+        grad_mu_log_map /= X.shape[0]
 
         # Compute exp_map part of the gradient
         dist = torch.distributions.MultivariateNormal(
@@ -159,13 +179,13 @@ class LANDMLE:
         )
         for _ in range(self.S):
             v = dist.sample()
-            grad_mu -= self._m(mu, v) * v
+            grad_mu_exp_map -= self._m(mu, v) * v
 
-        grad_mu *= torch.sqrt(
+        grad_mu_exp_map *= torch.sqrt(
             (2 * torch.pi) ** mu.shape[0] * torch.linalg.det(sigma)
         ) / (self.S * normalization_constant)
 
-        return grad_mu
+        return grad_mu_log_map + grad_mu_exp_map
 
     def _m(self, mu: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         """
@@ -197,34 +217,35 @@ class LANDMLE:
         Returns:
             torch.Tensor: The gradient of the log-likelihood with respect to sigma
         """
-        grad_sigma = torch.zeros_like(sigma)
+        grad_sigma_log_map = torch.zeros_like(sigma)
+        grad_sigma_exp_map = torch.zeros_like(sigma)
 
         # Compute log_map part of the gradient
         for x in X:
             log_map_ = log_map(mu, x)
-            grad_sigma += log_map_ @ log_map_.T
-        grad_sigma /= X.shape[0]
+            grad_sigma_log_map += torch.outer(log_map_, log_map_)
+        grad_sigma_log_map /= X.shape[0]
 
         # Compute exp_map part of the gradient
         dist = torch.distributions.MultivariateNormal(
             torch.zeros_like(mu), covariance_matrix=sigma
         )
-        for _ in range(self.S):
-            v = dist.sample()
-            grad_sigma -= self._m(mu, v) * v @ v.T
+        vs = dist.sample((self.S,))
+        for v in vs:
+            grad_sigma_exp_map -= self._m(mu, v) * torch.outer(v, v)
 
-        grad_sigma *= torch.sqrt(
+        grad_sigma_exp_map *= torch.sqrt(
             (2 * torch.pi) ** mu.shape[0] * torch.linalg.det(sigma)
         ) / (self.S * normalization_constant)
 
-        return grad_sigma
+        return A @ (grad_sigma_log_map + grad_sigma_exp_map)
 
     def _compute_A(self, sigma: torch.Tensor) -> torch.Tensor:
         """
-        Compute the A matrix from the covariance matrix
+        Compute the A matrix from the covariance matrix, A.T @ A = inv(sigma)
         Params:
             sigma (torch.Tensor): The covariance of the distribution
         Returns:
             torch.Tensor: The A matrix of the distribution
         """
-        return torch.linalg.cholesky(torch.linalg.inv(sigma))  # TODO store inverse
+        return torch.linalg.cholesky(torch.linalg.inv(sigma)).T  # TODO store inverse?
