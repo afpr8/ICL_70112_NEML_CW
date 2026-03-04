@@ -66,15 +66,15 @@ def test_loss(mock_log_map, land_model, dummy_data):
 
 @patch("land.metric")
 @patch("land.exp_map")
-def test_m(mock_exp_map, mock_metric, land_model):
+def test_m(mock_exp_map, mock_metric, land_model, dummy_data):
     """Test the metric deformation calculation _m."""
     mock_exp_map.return_value = torch.zeros(2)
     mock_metric.return_value = torch.eye(2) * 4.0
     
     mu = torch.zeros(2)
     v = torch.ones(2)
-    
-    val = land_model._m(mu, v)
+
+    val = land_model._m(mu, v, dummy_data)
     # Expected: sqrt(det(4*I)) = sqrt(16) = 4.0
     assert torch.allclose(val, torch.tensor(4.0))
 
@@ -131,7 +131,7 @@ def test_fit_learning_rates_and_convergence(
 ):
     """Test the fit wrapper runs correctly, adapts learning rates and stops when loss diff < epsilon."""
     # Setup mocks
-    mock_log_map.side_effect = lambda mu, x: torch.randn(2)
+    mock_log_map.side_effect = lambda mu, x, m: torch.randn(2)
     mock_exp_map.return_value = torch.zeros(2)
     mock_metric.return_value = torch.eye(2)
     mock_compute_norm.return_value = torch.tensor(1.0)

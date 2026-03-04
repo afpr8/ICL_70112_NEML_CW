@@ -47,7 +47,7 @@ class LANDMLE:
 
             # Update mu
             grad_mu = self._compute_grad_mu(mu, sigma, X, normalization_constant)
-            mu = exp_map(mu, self.lr_mu * grad_mu)  # grad_mu already has the neg sign
+            mu = exp_map(mu, self.lr_mu * grad_mu, metric(mu, X))  # grad alr has the -
             normalization_constant = compute_normalization_constant(mu, sigma)
 
             # Scale lr
@@ -114,7 +114,7 @@ class LANDMLE:
                 raise ValueError("Invalid method")
 
         # Compute covariance from tangent vectors
-        tangent_vectors = torch.stack([log_map(mu, x) for x in X])
+        tangent_vectors = torch.stack([log_map(mu, x, metric(mu, X)) for x in X])
         sigma = torch.cov(tangent_vectors.T)
 
         A = self._compute_A(sigma)
@@ -140,7 +140,7 @@ class LANDMLE:
         objective = 0
         inv_sigma = torch.linalg.inv(sigma)  # TODO cache inverse sigma?
         for x in X:
-            log_map_ = log_map(mu, x)
+            log_map_ = log_map(mu, x, metric(mu, X))
             objective += torch.dot(log_map_, inv_sigma @ log_map_)
 
         objective /= 2 * X.shape[0]
@@ -170,7 +170,7 @@ class LANDMLE:
 
         # Compute log_map part of the gradient
         for x in X:
-            grad_mu_log_map += log_map(mu, x)
+            grad_mu_log_map += log_map(mu, x, metric(mu, X))
         grad_mu_log_map /= X.shape[0]
 
         # Compute exp_map part of the gradient
@@ -179,7 +179,7 @@ class LANDMLE:
         )
         for _ in range(self.S):
             v = dist.sample()
-            grad_mu_exp_map -= self._m(mu, v) * v
+            grad_mu_exp_map -= self._m(mu, v, X) * v
 
         grad_mu_exp_map *= torch.sqrt(
             (2 * torch.pi) ** mu.shape[0] * torch.linalg.det(sigma)
@@ -187,16 +187,20 @@ class LANDMLE:
 
         return grad_mu_log_map + grad_mu_exp_map
 
-    def _m(self, mu: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+    def _m(self, mu: torch.Tensor, v: torch.Tensor, X: torch.Tensor) -> torch.Tensor:
         """
         Compute the deformation of the metric at mu in the direction of v
         Params:
             mu (torch.Tensor): The mean of the distribution
             v (torch.Tensor): The vector to compute the m function with
+            X (torch.Tensor): The data
         Returns:
             torch.Tensor: The deformation of the metric at mu in the direction of v
         """
-        return torch.sqrt(torch.linalg.det(metric(exp_map(mu, v))))
+        metric_mu = metric(mu, X)
+        translated_point = exp_map(mu, v, metric_mu)
+        metric_translated_point = metric(translated_point, X)
+        return torch.sqrt(torch.linalg.det(metric_translated_point))
 
     def _compute_grad_sigma(
         self,
@@ -222,7 +226,7 @@ class LANDMLE:
 
         # Compute log_map part of the gradient
         for x in X:
-            log_map_ = log_map(mu, x)
+            log_map_ = log_map(mu, x, metric(mu, X))
             grad_sigma_log_map += torch.outer(log_map_, log_map_)
         grad_sigma_log_map /= X.shape[0]
 
@@ -232,7 +236,7 @@ class LANDMLE:
         )
         vs = dist.sample((self.S,))
         for v in vs:
-            grad_sigma_exp_map -= self._m(mu, v) * torch.outer(v, v)
+            grad_sigma_exp_map -= self._m(mu, v, X) * torch.outer(v, v)
 
         grad_sigma_exp_map *= torch.sqrt(
             (2 * torch.pi) ** mu.shape[0] * torch.linalg.det(sigma)
