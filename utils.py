@@ -133,7 +133,8 @@ def compute_normalization_constant(
         Params:
             mu (d,): 1D mean tensor
             sigma (d,d): 2D covariance tensor
-            metric_fn: The 
+            metric_fn: metric function to compute the local metric tensor at
+                any point
             n_samples (optional): The number of Monte Carlo samples to use
         Returns:
             C: The Monte Carlo estimate of the normalizatio constant
