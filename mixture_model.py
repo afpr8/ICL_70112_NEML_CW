@@ -67,7 +67,7 @@ class LANDMixtureModel:
             for k in range(self.K):
                 inv_sigma = torch.linalg.inv(sigma[k])
                 for n, x in enumerate(X):
-                    lm = log_map(mu[k], x, self._metric(mu[k]))
+                    lm = log_map(mu[k], x, self._metric)
                     dist_sq = torch.dot(lm, inv_sigma @ lm)
                     
                     # p_M(x_n | mu_k, Sigma_k)
@@ -99,7 +99,7 @@ class LANDMixtureModel:
                 grad_mu = self._compute_grad_mu_k(mu[k], sigma[k], X, C[k], r[:, k], N_k)
 
                 # update mu
-                mu[k] = exp_map(mu[k], self.lr_mu * grad_mu, self._metric(mu[k]))
+                mu[k] = exp_map(mu[k], self.lr_mu * grad_mu, self._metric)
 
                 # estimate C_k using eq. 16
                 C[k] = compute_normalization_constant(mu[k], sigma[k], self._metric)
@@ -121,7 +121,7 @@ class LANDMixtureModel:
         # self._metric = None  # avoid memory leak
         return mu, sigma, C, pi
 
-    def _init_params(self, X: torch.Tensor, method: str = "random") -> tuple[list, list, list]:
+    def _init_params(self, X: torch.Tensor, method: str = "mean") -> tuple[list, list, list]:
         """
         Initialise the parameters of the mixture model.
         Params:
@@ -165,7 +165,7 @@ class LANDMixtureModel:
         
         for k in range(self.K):
             # Calculate initial covariance from tangent vectors mapped from the new mean
-            tangent_vectors = torch.stack([log_map(mu[k], x, self._metric(mu[k])) for x in X])
+            tangent_vectors = torch.stack([log_map(mu[k], x, self._metric) for x in X])
             sig = torch.cov(tangent_vectors.T)
             
             # Add a tiny ridge to the diagonal to ensure positive definiteness 
@@ -188,7 +188,7 @@ class LANDMixtureModel:
 
         # Compute log_map part weighted by responsibilities
         for n, x in enumerate(X):
-            grad_mu_log_map += r_k[n] * log_map(mu, x, self._metric(mu))
+            grad_mu_log_map += r_k[n] * log_map(mu, x, self._metric)
         grad_mu_log_map /= N_k
 
         # Compute exp_map part (independent of empirical data weights)
@@ -215,7 +215,7 @@ class LANDMixtureModel:
 
         # Compute log_map part weighted by responsibilities
         for n, x in enumerate(X):
-            log_map_ = log_map(mu, x, self._metric(mu))
+            log_map_ = log_map(mu, x, self._metric)
             grad_sigma_log_map += r_k[n] * torch.outer(log_map_, log_map_)
         grad_sigma_log_map /= N_k
 
@@ -234,8 +234,7 @@ class LANDMixtureModel:
         return A @ (grad_sigma_log_map + grad_sigma_exp_map)
 
     def _m(self, mu: torch.Tensor, v: torch.Tensor, X: torch.Tensor) -> torch.Tensor:
-        metric_mu = self._metric(mu)
-        translated_point = exp_map(mu, v, metric_mu)
+        translated_point = exp_map(mu, v, self._metric)
         metric_translated_point = self._metric(translated_point)
         return torch.sqrt(torch.linalg.det(metric_translated_point))
 
