@@ -39,154 +39,42 @@ def tensor_cache(
 
     return wrapper
 
-from geomstats.geometry.riemannian_metric import RiemannianMetric
 
-def exp_map(x: torch.Tensor, v: torch.Tensor, metric: RiemannianMetric) -> torch.Tensor:
+@tensor_cache
+def exp_map(x:torch.Tensor, v:torch.Tensor, metric_fn: callable) -> torch.Tensor:
     """
-    Computes the exponential map using the geomstats backend.
-    
-    Params:
-        x (d,): The query point on the manifold.
-        v (d,): The tangent vector to map.
-        metric (RiemannianMetric): The instantiated geomstats LAND metric.
-    Returns:
-        y_hat (d,): The point on the manifold obtained by mapping v.
+        The exponential map corresponding to the LAND metric implemented below
+        Params:
+            x (d,): The query point
+            v (d,): The tangent vector to map
+            metric_fn (callable): A function returning the metric tensor at a given point
+        Returns:
+            exp_xv (d,): The point on the manifold obtained by mapping v
+                from the tangent plane at x utilizing M_x
     """
-    # geomstats automatically solves the Initial Value Problem (IVP)
-    return metric.exp(tangent_vec=v, base_point=x)
+    M_x = metric_fn(x)
+    diag_sqrt_inv = torch.sqrt(torch.diag(M_x))**(-1)
+    v_scaled = diag_sqrt_inv * v
 
-def log_map(x: torch.Tensor, y: torch.Tensor, metric: RiemannianMetric) -> torch.Tensor:
+    return x + v_scaled
+
+@tensor_cache
+def log_map(x:torch.Tensor, y:torch.Tensor, metric_fn: callable) -> torch.Tensor:
     """
-    Computes the logarithmic map using the geomstats backend.
-    
-    Params:
-        x (d,): The query point on the manifold.
-        y (d,): The target manifold point to map to the tangent plane.
-        metric (RiemannianMetric): The instantiated geomstats LAND metric.
-    Returns:
-        v (d,): The tangent vector at x that shoots exactly to y.
+        The logarithmic map corresponding to the LAND metric implemented below
+        Params:
+            x (d,): The query point
+            y (d,): The manifold point to map to the tangent plane
+            metric_fn (callable): A function returning the metric tensor at a given point
+        Returns:
+            log_xy (d,): The vector on the tangent plane at x obtained by
+                mapping y from the manifold utilizing M_x
     """
-    # geomstats automatically solves the Boundary Value Problem (BVP)
-    return metric.log(point=y, base_point=x)
+    M_x = metric_fn(x)
+    diag_sqrt = torch.sqrt(torch.diag(M_x))
+    log_xy = diag_sqrt * (y - x)
 
-# @tensor_cache
-# def exp_map(x:torch.Tensor, v:torch.Tensor, metric_fn: callable) -> torch.Tensor:
-#     """
-#         The exponential map corresponding to the LAND metric implemented below
-#         Params:
-#             x (d,): The query point
-#             v (d,): The tangent vector to map
-#             metric_fn (callable): A function returning the metric tensor at a given point
-#         Returns:
-#             exp_xv (d,): The point on the manifold obtained by mapping v
-#                 from the tangent plane at x utilizing M_x
-#     """
-#     M_x = metric_fn(x)
-#     diag_sqrt_inv = torch.sqrt(torch.diag(M_x))**(-1)
-#     v_scaled = diag_sqrt_inv * v
-
-#     return x + v_scaled
-
-# @tensor_cache
-# def exp_map(x: torch.Tensor, v: torch.Tensor, metric_fn: callable, steps: int = 10) -> torch.Tensor:
-#     """
-#     The exponential map corresponding to the LAND metric.
-#     Computes the map by solving the geodesic ODE as an Initial Value Problem.
-
-#     Params:
-#         x (d,): The query point on the manifold.
-#         v (d,): The tangent vector to map.
-#         metric_fn (callable): A function returning the (d, d) metric tensor at a point.
-#         steps (int): Number of integration steps to discretise the path.
-#     Returns:
-#         gamma (d,): The resulting point on the manifold.
-#     """
-#     # Time step for the integration from t=0 to t=1
-#     dt = 1.0 / steps
-
-#     # Initialise the curve position (gamma) and its velocity (gamma_dot)
-#     gamma = x.clone()
-#     gamma_dot = v.clone()
-
-#     # Helper function to get the flattened metric for the Jacobian calculation
-#     def metric_vec_fn(pos):
-#         return metric_fn(pos).view(-1)
-
-#     for _ in range(steps):
-#         # 1. Compute the metric tensor and its inverse at the current position
-#         M = metric_fn(gamma)
-#         M_inv = torch.linalg.inv(M)
-
-#         # 2. Compute the Jacobian of the vectorised metric tensor wrt position
-#         # Shape: (d*d, d)
-#         J = torch.autograd.functional.jacobian(metric_vec_fn, gamma, create_graph=True)
-
-#         # 3. Compute the Kronecker product of the velocity vector
-#         # Shape: (d*d,)
-#         v_kron_v = torch.kron(gamma_dot, gamma_dot)
-
-#         # 4. Calculate the acceleration (gamma_ddot) based on the geodesic ODE
-#         # gamma'' = -0.5 * M^{-1} [d(vec(M))/d(gamma)]^T (v \otimes v)
-#         force = 0.5 * torch.mv(J.t(), v_kron_v)
-#         gamma_ddot = -torch.mv(M_inv, force)
-
-#         # 5. Euler integration step
-#         gamma = gamma + gamma_dot * dt
-#         gamma_dot = gamma_dot + gamma_ddot * dt
-
-#     return gamma
-
-
-# # @tensor_cache
-# # def log_map(x:torch.Tensor, y:torch.Tensor, metric_fn: callable) -> torch.Tensor:
-# #     """
-# #         The logarithmic map corresponding to the LAND metric implemented below
-# #         Params:
-# #             x (d,): The query point
-# #             y (d,): The manifold point to map to the tangent plane
-# #             metric_fn (callable): A function returning the metric tensor at a given point
-# #         Returns:
-# #             log_xy (d,): The vector on the tangent plane at x obtained by
-# #                 mapping y from the manifold utilizing M_x
-# #     """
-# #     M_x = metric_fn(x)
-# #     diag_sqrt = torch.sqrt(torch.diag(M_x))
-# #     log_xy = diag_sqrt * (y - x)
-
-# #     return log_xy
-
-# def log_map(x: torch.Tensor, y: torch.Tensor, metric_fn: callable, max_iters: int = 20, lr: float = 0.1) -> torch.Tensor:
-#     """
-#     The logarithmic map corresponding to the LAND metric.
-#     Computes the map by solving the BVP via a gradient-based shooting method.
-#     """
-#     # 1. Detach inputs to isolate this inner optimisation from the outer EM graph
-#     x_in = x.detach()
-#     y_in = y.detach()
-
-#     M_x = metric_fn(x_in)
-#     diag_sqrt = torch.sqrt(torch.diag(M_x))
-    
-#     # 2. Initialise the velocity and flag it for gradients
-#     v = (diag_sqrt * (y_in - x_in)).clone().detach().requires_grad_(True)
-    
-#     optimiser = torch.optim.Adam([v], lr=lr)
-    
-#     for _ in range(max_iters):
-#         optimiser.zero_grad()
-        
-#         # Shoot the curve from x_in using the current velocity v
-#         y_hat = exp_map(x_in, v, metric_fn) 
-        
-#         loss = torch.sum((y_hat - y_in) ** 2)
-        
-#         if loss.item() < 1e-5:
-#             break
-            
-#         loss.backward()
-#         optimiser.step()
-        
-#     return v.detach()
+    return log_xy
 
 @tensor_cache
 def metric(
