@@ -2,7 +2,12 @@
 
 import torch
 
-from utils import exp_map, log_map, metric
+from utils import (
+    compute_normalization_constant,
+    exp_map,
+    log_map,
+    metric
+)
 
 
 def test_metric_shape_and_pd():
@@ -48,3 +53,65 @@ def test_metric_changes_with_point():
 
     # Check that metrics at different points are not identical
     assert not torch.allclose(M1, M2)
+
+
+def test_normalization_returns_scalar():
+    torch.manual_seed(0)
+
+    d = 2
+    mu = torch.zeros(d)
+    sigma = torch.eye(d)
+
+    metric_fn = lambda x: torch.eye(d)
+
+    C = compute_normalization_constant(mu, sigma, metric_fn, n_samples=500)
+
+    assert isinstance(C, torch.Tensor)
+    assert C.ndim == 0
+
+
+def test_normalization_matches_euclidean_case(monkeypatch):
+    torch.manual_seed(0)
+
+    d = 2
+    mu = torch.zeros(d)
+    sigma = torch.eye(d)
+
+    metric_fn = lambda x: torch.eye(d)
+
+    C = compute_normalization_constant(mu, sigma, metric_fn, n_samples=3000)
+
+    Z = torch.sqrt((2 * torch.pi)**d * torch.det(sigma))
+
+    assert torch.allclose(C, Z, atol=1e-1)
+
+
+def test_normalization_is_positive():
+    torch.manual_seed(0)
+
+    d = 2
+    mu = torch.zeros(d)
+    sigma = torch.eye(d)
+
+    metric_fn = lambda x: torch.eye(d)
+
+    C = compute_normalization_constant(mu, sigma, metric_fn, n_samples=500)
+
+    assert C > 0
+
+
+def test_normalization_increases_with_covariance():
+    torch.manual_seed(0)
+
+    d = 2
+    mu = torch.zeros(d)
+
+    sigma_small = torch.eye(d)
+    sigma_large = 2 * torch.eye(d)
+
+    metric_fn = lambda x: torch.eye(d)
+
+    C_small = compute_normalization_constant(mu, sigma_small, metric_fn, n_samples=1500)
+    C_large = compute_normalization_constant(mu, sigma_large, metric_fn, n_samples=1500)
+
+    assert C_large > C_small
