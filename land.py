@@ -67,7 +67,7 @@ class LANDMLE:
             # Update mu
             grad_mu = self._compute_grad_mu(mu, sigma, X, normalization_constant)
             mu = exp_map(
-                mu, self.lr_mu * grad_mu, self._metric(mu)
+                mu, self.lr_mu * grad_mu, self._metric
             )  # grad_mu already has the -1 factor
             normalization_constant = compute_normalization_constant(
                 mu, sigma, self._metric
@@ -138,7 +138,7 @@ class LANDMLE:
                 raise ValueError("Invalid method")
 
         # Compute covariance from tangent vectors
-        tangent_vectors = torch.stack([log_map(mu, x, self._metric(mu)) for x in X])
+        tangent_vectors = torch.stack([log_map(mu, x, self._metric) for x in X])
         sigma = torch.cov(tangent_vectors.T)
 
         A = self.compute_A(sigma)
@@ -164,7 +164,7 @@ class LANDMLE:
         objective = 0
         inv_sigma = torch.linalg.inv(sigma)  # TODO cache inverse sigma?
         for x in X:
-            log_map_ = log_map(mu, x, self._metric(mu))
+            log_map_ = log_map(mu, x, self._metric)
             objective += torch.dot(log_map_, inv_sigma @ log_map_)
 
         objective /= 2 * X.shape[0]
@@ -194,7 +194,7 @@ class LANDMLE:
 
         # Compute log_map part of the gradient
         for x in X:
-            grad_mu_log_map += log_map(mu, x, self._metric(mu))
+            grad_mu_log_map += log_map(mu, x, self._metric)
         grad_mu_log_map /= X.shape[0]
 
         # Compute exp_map part of the gradient
@@ -221,7 +221,6 @@ class LANDMLE:
         Returns:
             torch.Tensor: The deformation of the metric at mu in the direction of v
         """
-        metric_mu = self._metric(mu)
         translated_point = exp_map(mu, v, metric_mu)
         metric_translated_point = self._metric(translated_point)
         return torch.sqrt(torch.linalg.det(metric_translated_point))
@@ -250,7 +249,7 @@ class LANDMLE:
 
         # Compute log_map part of the gradient
         for x in X:
-            log_map_ = log_map(mu, x, self._metric(mu))
+            log_map_ = log_map(mu, x, self._metric)
             grad_sigma_log_map += torch.outer(log_map_, log_map_)
         grad_sigma_log_map /= X.shape[0]
 
