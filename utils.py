@@ -95,8 +95,8 @@ def log_map(
 def metric(
     x: torch.Tensor,
     X: torch.Tensor,
-    sigma: float = 1.0,
-    rho: float = 1e-3
+    sigma: float = 1.0, # A standard default Gaussian kernel size
+    rho: float = 1e-3 # Unspecified in LAND paper - a small value suffices
 ) -> torch.Tensor:
     """
         Compute the local Riemmanian metric tensor at point x
@@ -169,7 +169,7 @@ def geodesic_ode(
     t: torch.Tensor, # Even though t is not used the odeint solver passes one
     y: torch.Tensor,
     metric_fn: Callable[[torch.Tensor], torch.Tensor], # Requires partial init
-    eps: float = 1e-5
+    eps: float = 1e-5 # Choose a very small step size to accurately approximate
 ) -> torch.Tensor:
     """
     Defines the geodesic ODE for a Riemannian manifold with a diagonal metric
