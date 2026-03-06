@@ -3,7 +3,7 @@ import jax
 import jax.numpy as jnp
 from unittest.mock import patch, MagicMock
 
-from land import LANDMLE
+from src.models.land import LANDMLE
 
 @pytest.fixture
 def land_model():
@@ -21,7 +21,7 @@ def test_init(land_model):
     assert land_model.S == 10
     assert land_model.epsilon == 1e-4
 
-@patch("land.jax_log_map_shooting")
+@patch("src.models.land.jax_log_map_shooting")
 def test_init_params_random(mock_log_map, land_model, dummy_data):
     """Test random initialization."""
     mock_log_map.side_effect = [
@@ -33,7 +33,7 @@ def test_init_params_random(mock_log_map, land_model, dummy_data):
     assert sigma.shape == (2, 2)
     assert A.shape == (2, 2)
 
-@patch("land.jax_log_map_shooting")
+@patch("src.models.land.jax_log_map_shooting")
 def test_init_params_mean(mock_log_map, land_model, dummy_data):
     """Test mean initialization."""
     mock_log_map.side_effect = [
@@ -53,7 +53,7 @@ def test_compute_A(land_model):
     expected_A = jnp.linalg.cholesky(jnp.linalg.inv(sigma)).T
     assert jnp.allclose(A, expected_A)
 
-@patch("land.jax_log_map_shooting")
+@patch("src.models.land.jax_log_map_shooting")
 def test_loss(mock_log_map, land_model, dummy_data):
     """Test loss computation."""
     # Precomputed log_maps: shape (N, d), each row is [1.0, 1.0]
@@ -68,8 +68,8 @@ def test_loss(mock_log_map, land_model, dummy_data):
     expected_obj = 1.0 + jnp.log(jnp.array(2.0))
     assert jnp.allclose(loss_val, expected_obj)
 
-@patch("land.jax_metric")
-@patch("land.jax_exp_map")
+@patch("src.models.land.jax_metric")
+@patch("src.models.land.jax_exp_map")
 def test_m(mock_exp_map, mock_metric, land_model, dummy_data):
     """Test the metric deformation calculation _m."""
     mock_exp_map.return_value = jnp.zeros(2)
@@ -82,9 +82,9 @@ def test_m(mock_exp_map, mock_metric, land_model, dummy_data):
     val = land_model._m(mu, v)
     assert jnp.allclose(val, jnp.array(4.0))
 
-@patch("land.jax_metric")
-@patch("land.jax_exp_map")
-@patch("land.jax_log_map_shooting")
+@patch("src.models.land.jax_metric")
+@patch("src.models.land.jax_exp_map")
+@patch("src.models.land.jax_log_map_shooting")
 def test_compute_grad_mu(
     mock_log_map, mock_exp_map, mock_metric, land_model, dummy_data
 ):
@@ -103,9 +103,9 @@ def test_compute_grad_mu(
     grad = land_model._compute_grad_mu(mu, sigma, normalization_constant, key, log_maps)
     assert grad.shape == mu.shape
 
-@patch("land.jax_metric")
-@patch("land.jax_exp_map")
-@patch("land.jax_log_map_shooting")
+@patch("src.models.land.jax_metric")
+@patch("src.models.land.jax_exp_map")
+@patch("src.models.land.jax_log_map_shooting")
 def test_compute_grad_sigma(
     mock_log_map, mock_exp_map, mock_metric, land_model, dummy_data
 ):
@@ -130,10 +130,10 @@ def test_compute_grad_sigma(
     except Exception as e:
         pytest.fail(f"grad_sigma raised an unexpected exception: {e}")
 
-@patch("land.compute_normalization_constant")
-@patch("land.jax_metric")
-@patch("land.jax_exp_map")
-@patch("land.jax_log_map_shooting")
+@patch("src.models.land.compute_normalization_constant")
+@patch("src.models.land.jax_metric")
+@patch("src.models.land.jax_exp_map")
+@patch("src.models.land.jax_log_map_shooting")
 def test_fit_learning_rates_and_convergence(
     mock_log_map, mock_exp_map, mock_metric, mock_compute_norm, land_model, dummy_data
 ):

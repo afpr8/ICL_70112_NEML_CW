@@ -6,8 +6,9 @@ from sklearn.datasets import make_moons
 from functools import partial
 
 # Import your custom modules here
-from land import LANDMLE
-from utils import jax_log_map_shooting, jax_exp_map, jax_metric, plot_mixture_contours
+from src.models.land import LANDMLE
+from src.utils.land_utils import jax_log_map_shooting, jax_exp_map, jax_metric
+from src.utils.plotting_utils import plot_mixture_contours
 
 def get_geodesic_path(mu, x, metric_fn, steps=10):
     """

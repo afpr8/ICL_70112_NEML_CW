@@ -5,10 +5,12 @@ import jax.numpy as jnp
 import numpy as np
 import torch
 
-from utils import (
+from src.utils.land_utils import (
     jax_metric,
     jax_exp_map,
     jax_log_map_shooting,
+)
+from src.utils.legacy_torch_utils import (
     torch_metric,
     torch_exp_map,
 )

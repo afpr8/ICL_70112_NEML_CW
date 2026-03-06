@@ -4,7 +4,7 @@ from functools import partial
 from sklearn.mixture import GaussianMixture
 from tqdm import tqdm
 
-from utils import (
+from src.utils.land_utils import (
     jax_exp_map,
     jax_log_map_shooting,
     compute_normalization_constant,

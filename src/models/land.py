@@ -3,7 +3,7 @@ import jax.numpy as jnp
 from functools import partial
 from tqdm import tqdm
 
-from utils import (
+from src.utils.land_utils import (
     compute_normalization_constant,
     jax_exp_map,
     jax_log_map_shooting,

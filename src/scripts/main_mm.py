@@ -7,8 +7,10 @@ from sklearn.mixture import GaussianMixture
 from functools import partial
 
 # Import your custom modules here
-from mixture_model import LANDMixtureModel
-from utils import jax_log_map_shooting, jax_exp_map, jax_metric, plot_full_comparison
+from src.models.mixture_model import LANDMixtureModel
+from src.utils.land_utils import jax_log_map_shooting, jax_exp_map, jax_metric
+from src.utils.plotting_utils import plot_full_comparison
+
 
 def get_geodesic_path(mu, x, metric_fn, steps=10):
     """

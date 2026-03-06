@@ -2,7 +2,7 @@
 
 import torch
 
-from utils import (
+from src.utils.legacy_torch_utils import (
     torch_compute_normalization_constant,
     torch_exp_map,
     torch_log_map,
