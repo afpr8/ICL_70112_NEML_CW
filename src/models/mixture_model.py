@@ -3,6 +3,7 @@ import jax.numpy as jnp
 from functools import partial
 from sklearn.mixture import GaussianMixture
 from tqdm import tqdm
+import numpy as np
 
 from src.utils.land_utils import (
     jax_exp_map,
@@ -192,7 +193,6 @@ class LANDMixtureModel:
             gmm = GaussianMixture(
                 n_components=self.K, covariance_type="full", random_state=42
             )
-            import numpy as np
 
             gmm.fit(np.array(X))
             mu = [jnp.array(m, dtype=jnp.float32) for m in gmm.means_]
