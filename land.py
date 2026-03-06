@@ -240,7 +240,7 @@ class LANDMLE:
         Returns:
             torch.Tensor: The square root of the metric determinant at exp_mu(v)
         """
-        translated_point = exp_map(mu, v, metric_mu)
+        translated_point = exp_map(mu, v, self._metric)
         metric_translated_point = self._metric(translated_point)
         return torch.sqrt(torch.linalg.det(metric_translated_point))
 

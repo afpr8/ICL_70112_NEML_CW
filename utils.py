@@ -48,7 +48,7 @@ def tensor_cache(
 
 
 @tensor_cache
-def exp_map(x:torch.Tensor, v:torch.Tensor, metric_fn: callable) -> torch.Tensor:
+def exp_map(x:torch.Tensor, v:torch.Tensor, metric_fn: Callable[[torch.Tensor], torch.Tensor]) -> torch.Tensor:
     """
         The exponential map corresponding to the LAND metric implemented below
         Params:
@@ -66,7 +66,7 @@ def exp_map(x:torch.Tensor, v:torch.Tensor, metric_fn: callable) -> torch.Tensor
     return x + v_scaled
 
 @tensor_cache
-def log_map(x:torch.Tensor, y:torch.Tensor, metric_fn: callable) -> torch.Tensor:
+def log_map(x:torch.Tensor, y:torch.Tensor, metric_fn: Callable[[torch.Tensor], torch.Tensor]) -> torch.Tensor:
     """
         The logarithmic map corresponding to the LAND metric implemented below
         Params:
