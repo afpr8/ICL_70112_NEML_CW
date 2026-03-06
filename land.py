@@ -1,7 +1,14 @@
+import jax
+import jax.numpy as jnp
 from functools import partial
-import torch
+from tqdm import tqdm
 
-from utils import compute_normalization_constant, exp_map, log_map, metric
+from utils import (
+    compute_normalization_constant,
+    jax_exp_map,
+    jax_log_map_shooting,
+    jax_metric,
+)
 
 
 class LANDMLE:
@@ -12,6 +19,7 @@ class LANDMLE:
     Riemannian manifold. It uses Riemannian Gradient Descent to iteratively update the spatial
     mean (mu) and the covariance matrix (sigma) by maximizing the log-likelihood of the data.
     """
+
     def __init__(
         self,
         initial_lr_mu: float = 1e-3,
@@ -23,6 +31,7 @@ class LANDMLE:
         sigma: float = 1.0,  # Set to 1.0 in the original paper and tested from 0.5 to 1.5
         rho: float = 1e-3,
         init_method: str = "mean",
+        seed: int = 42,
     ):
         """
         Initialize the LAND model
@@ -39,6 +48,7 @@ class LANDMLE:
                 - "random": Initialize mu randomly, sigma from empirical cov of tangent vectors.
                 - "mean": Initialize mu as the empirical mean, sigma from empirical cov of tangent vectors.
                 - "GMM": Initialize mu and sigma with a Gaussian Mixture Model.
+            seed (int): The PRNG seed used for jax RNG initialization.
         """
         self.lr_mu = initial_lr_mu
         self.lr_A = initial_lr_A
@@ -51,148 +61,169 @@ class LANDMLE:
         self.rho = rho
 
         self.init_method = init_method
-
+        self.key = jax.random.key(seed)
         self._metric = None
 
-    def fit(self, X: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def fit(self, X: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
         """
         Fit the LAND model to the data
         Params:
-            X (torch.Tensor): The data to fit the model to, shape (N, D)
+            X (jnp.ndarray): The data to fit the model to, shape (N, D)
         Returns:
-            mu (torch.Tensor): The mean of the distribution
-            sigma (torch.Tensor): The covariance of the distribution
-            normalization_constant (torch.Tensor): The normalization constant of the distribution
+            mu (jnp.ndarray): The mean of the distribution
+            sigma (jnp.ndarray): The covariance of the distribution
+            normalization_constant (jnp.ndarray): The normalization constant of the distribution
         """
-        self._metric = partial(metric, X=X, sigma=self.sigma, rho=self.rho)
+        self._metric = partial(jax_metric, X=X, sigma=self.sigma, rho=self.rho)
+        # Cache the vmapped log_map_shooting for reuse every iteration
+        log_map_vmap = jax.vmap(jax_log_map_shooting, in_axes=(None, 0, None))
 
-        mu, A, sigma = self._init_params(X, self.init_method)
+        self.key, subkey = jax.random.split(self.key)
+        mu, A, sigma = self._init_params(X, subkey, self.init_method, log_map_vmap)
+
+        self.key, subkey = jax.random.split(self.key)
         normalization_constant = compute_normalization_constant(
-            mu, sigma, self._metric, self.S
+            mu, sigma, self._metric, subkey, self.S
         )
         loss_diff = float("inf")
 
-        while loss_diff**2 > self.epsilon:
-            # Store previous values
-            prev_sigma = sigma
-            prev_normalization_constant = normalization_constant
-            prev_loss = self._loss(mu, sigma, X, normalization_constant)
+        with tqdm(desc="LAND MLE Fit", unit="epoch") as pbar:
+            while loss_diff**2 > self.epsilon:
+                # Store previous values
+                prev_sigma = sigma
+                prev_normalization_constant = normalization_constant
 
-            # Update mu
-            grad_mu = self._compute_grad_mu(mu, sigma, X, normalization_constant)
-            mu = exp_map(
-                mu, self.lr_mu * grad_mu, self._metric
-            )  # grad_mu already has the -1 factor
-            normalization_constant = compute_normalization_constant(
-                mu, sigma, self._metric, self.S
-            )
+                # Compute log_maps once, reused by loss, grad_mu, and grad_sigma
+                log_maps = log_map_vmap(mu, X, self._metric)
+                prev_loss = self._loss(sigma, log_maps, normalization_constant)
 
-            # Scale lr
-            loss_diff = self._loss(mu, sigma, X, normalization_constant) - prev_loss
-            if loss_diff > 0:
-                self.lr_mu *= self.lr_scale_down
-            else:
-                self.lr_mu *= self.lr_scale_up
+                # Update mu
+                self.key, subkey = jax.random.split(self.key)
+                grad_mu = self._compute_grad_mu(
+                    mu, sigma, normalization_constant, subkey, log_maps
+                )
+                mu = jax_exp_map(
+                    mu, self.lr_mu * grad_mu, self._metric
+                )  # grad_mu already has the -1 factor
 
-            # Update sigma
-            grad_sigma = self._compute_grad_sigma(
-                mu, A, sigma, X, normalization_constant
-            )
-            A = A - self.lr_A * grad_sigma
-            sigma = torch.inverse(A.T @ A)
+                self.key, subkey = jax.random.split(self.key)
+                normalization_constant = compute_normalization_constant(
+                    mu, sigma, self._metric, subkey, self.S
+                )
 
-            prev_normalization_constant = normalization_constant
-            normalization_constant = compute_normalization_constant(
-                mu, sigma, self._metric, self.S
-            )
+                # Scale lr_mu: shrink if loss increased, grow if it decreased
+                log_maps = log_map_vmap(mu, X, self._metric)
+                loss_diff = (
+                    self._loss(sigma, log_maps, normalization_constant) - prev_loss
+                )
+                if loss_diff > 0:
+                    self.lr_mu *= self.lr_scale_down
+                else:
+                    self.lr_mu *= self.lr_scale_up
 
-            # Scale lr
-            new_loss = self._loss(mu, sigma, X, normalization_constant)
-            loss_diff = new_loss - self._loss(
-                mu, prev_sigma, X, prev_normalization_constant
-            )
-            if loss_diff > 0:
-                self.lr_A *= self.lr_scale_down
-            else:
-                self.lr_A *= self.lr_scale_up
+                # Update sigma
+                self.key, subkey = jax.random.split(self.key)
+                grad_sigma = self._compute_grad_sigma(
+                    mu, A, sigma, normalization_constant, subkey, log_maps
+                )
+                A = A - self.lr_A * grad_sigma
+                sigma = jnp.linalg.inv(A.T @ A)
 
-            # Compute full loss diff for stopping condition
-            loss_diff = new_loss - prev_loss
-        self._metric = None  # avoid memory leak
+                prev_normalization_constant = normalization_constant
+                self.key, subkey = jax.random.split(self.key)
+                normalization_constant = compute_normalization_constant(
+                    mu, sigma, self._metric, subkey, self.S
+                )
 
+                # log_maps at new mu haven't changed from the post-mu-update vmap above
+                new_loss = self._loss(sigma, log_maps, normalization_constant)
+                # Scale lr_A: compare new sigma loss against previous sigma
+                loss_diff_A = new_loss - self._loss(
+                    prev_sigma, log_maps, prev_normalization_constant
+                )
+                if loss_diff_A > 0:
+                    self.lr_A *= self.lr_scale_down
+                else:
+                    self.lr_A *= self.lr_scale_up
+
+                loss_diff = new_loss - prev_loss
+
+                pbar.set_postfix(loss_diff=float(loss_diff), loss=float(new_loss))
+                pbar.update(1)
+
+        self._metric = None
         return mu, sigma, normalization_constant
 
     def _init_params(
-        self, X: torch.Tensor, method: str = "mean"
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        self, X: jnp.ndarray, key: jax.Array, method: str = "mean", log_map_vmap=None
+    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
         """
         Initialize the parameters of the model
         Params:
-            X (torch.Tensor): The data to initialize the parameters with
+            X (jnp.ndarray): The data to initialize the parameters with
+            key (jax.Array): Random key for operations
             method (str): The method to use for initialization.
                 - "random": Initialize mu randomly, sigma from empirical cov of tangent vectors.
                 - "mean": Initialize mu as the empirical mean, sigma from empirical cov of tangent vectors.
                 - "GMM": Initialize mu and sigma with a Gaussian Mixture Model.
+            log_map_vmap: Pre-built vmap of jax_log_map_shooting for efficiency.
         Returns:
-            mu (torch.Tensor): The mean of the distribution
-            A (torch.Tensor): The A matrix of the distribution
-            sigma (torch.Tensor): The covariance of the distribution
+            mu (jnp.ndarray): The mean of the distribution
+            A (jnp.ndarray): The A matrix of the distribution
+            sigma (jnp.ndarray): The covariance of the distribution
         """
-        match method:
-            case "random":
-                mu = X[torch.randint(0, X.shape[0], (1,))].squeeze()
-            case "mean":
-                mu = torch.mean(X, dim=0)
-            case "GMM":
-                raise NotImplementedError("GMM initialization is not implemented yet")
-            case _:
-                raise ValueError("Invalid method")
+        if method == "random":
+            mu = X[jax.random.randint(key, (1,), 0, X.shape[0])].squeeze()
+        elif method == "mean":
+            mu = jnp.mean(X, axis=0)
+        elif method == "GMM":
+            raise NotImplementedError("GMM initialization not implemented yet")
+        else:
+            raise ValueError("Invalid method")
 
-        # Compute covariance from tangent vectors
-        tangent_vectors = torch.stack([log_map(mu, x, self._metric) for x in X])
-        sigma = torch.cov(tangent_vectors.T)
+        # Compute covariance from tangent vectors at mu
+        if log_map_vmap is None:
+            log_map_vmap = jax.vmap(jax_log_map_shooting, in_axes=(None, 0, None))
+        tangent_vectors = log_map_vmap(mu, X, self._metric)
+        sigma = jnp.cov(tangent_vectors.T)
 
         A = self.compute_A(sigma)
         return mu, A, sigma
 
     def _loss(
         self,
-        mu: torch.Tensor,
-        sigma: torch.Tensor,
-        X: torch.Tensor,
-        normalization_constant: torch.Tensor,
-    ) -> torch.Tensor:
+        sigma: jnp.ndarray,
+        log_maps: jnp.ndarray,
+        normalization_constant: jnp.ndarray,
+    ) -> jnp.ndarray:
         """
         Compute the negative log-likelihood (empirical risk) of the LAND model given the data.
 
         This computes the objective function locally using the Mahalanobis-like distance
         in the tangent space (via the log map), as well as the normalization constant.
         Params:
-            mu (torch.Tensor): The mean of the distribution
-            sigma (torch.Tensor): The covariance of the distribution
-            X (torch.Tensor): The data
-            normalization_constant (torch.Tensor): The normalization constant of the distribution
+            sigma (jnp.ndarray): The covariance of the distribution
+            log_maps (jnp.ndarray): Pre-computed log maps of all data points at mu, shape (N, D)
+            normalization_constant (jnp.ndarray): The normalization constant of the distribution
         Returns:
-            torch.Tensor: The objective function value
+            jnp.ndarray: The objective function value
         """
-        objective = 0
-        inv_sigma = torch.linalg.inv(sigma)
-        for x in X:
-            log_map_ = log_map(mu, x, self._metric)
-            objective += torch.dot(log_map_, inv_sigma @ log_map_)
+        inv_sigma = jnp.linalg.inv(sigma)
+        # Compute Mahalanobis-like squared distances in the tangent space
+        distances = jnp.sum((log_maps @ inv_sigma) * log_maps, axis=-1)
 
-        objective /= 2 * X.shape[0]
-        objective += torch.log(normalization_constant)
-
+        objective = jnp.sum(distances) / (2 * log_maps.shape[0])
+        objective += jnp.log(normalization_constant)
         return objective
 
     def _compute_grad_mu(
         self,
-        mu: torch.Tensor,
-        sigma: torch.Tensor,
-        X: torch.Tensor,
-        normalization_constant: torch.Tensor,
-    ) -> torch.Tensor:
+        mu: jnp.ndarray,
+        sigma: jnp.ndarray,
+        normalization_constant: jnp.ndarray,
+        key: jax.Array,
+        log_maps: jnp.ndarray,
+    ) -> jnp.ndarray:
         """
         Compute the gradient of the log-likelihood with respect to the spatial mean (mu).
 
@@ -201,57 +232,55 @@ class LANDMLE:
         integral term representing the gradient of the normalization constant. The intractable
         term is estimated using Monte Carlo sampling.
         Params:
-            mu (torch.Tensor): The mean of the distribution
-            sigma (torch.Tensor): The covariance of the distribution
-            X (torch.Tensor): The data
-            normalization_constant (torch.Tensor): The normalization constant of the distribution
+            mu (jnp.ndarray): The mean of the distribution
+            sigma (jnp.ndarray): The covariance of the distribution
+            normalization_constant (jnp.ndarray): The normalization constant of the distribution
+            key (jax.Array): Random key for operations
+            log_maps (jnp.ndarray): Pre-computed log maps of all data points at mu, shape (N, D)
         Returns:
-            torch.Tensor: The gradient of the log-likelihood with respect to mu
+            jnp.ndarray: The gradient of the log-likelihood with respect to mu
         """
-        grad_mu_log_map = torch.zeros_like(mu)
-        grad_mu_exp_map = torch.zeros_like(mu)
+        # Compute log_map part of the gradient (empirical mean in tangent space)
+        grad_mu_log_map = jnp.mean(log_maps, axis=0)
 
-        # Compute log_map part of the gradient
-        for x in X:
-            grad_mu_log_map += log_map(mu, x, self._metric)
-        grad_mu_log_map /= X.shape[0]
-
-        # Compute exp_map part of the gradient
-        dist = torch.distributions.MultivariateNormal(
-            torch.zeros_like(mu), covariance_matrix=sigma
+        # Compute exp_map part of the gradient (MC estimate of normalization integral)
+        d = mu.shape[0]
+        v_samples = jax.random.multivariate_normal(
+            key, mean=jnp.zeros(d), cov=sigma, shape=(self.S,)
         )
-        for _ in range(self.S):
-            v = dist.sample()
-            grad_mu_exp_map -= self._m(mu, v, X) * v
+        mc_scale = jnp.sqrt((2 * jnp.pi) ** d * jnp.linalg.det(sigma)) / (
+            self.S * normalization_constant
+        )
 
-        grad_mu_exp_map *= torch.sqrt(
-            (2 * torch.pi) ** mu.shape[0] * torch.linalg.det(sigma)
-        ) / (self.S * normalization_constant)
+        def exp_loss(v):
+            return self._m(mu, v) * v
+
+        grad_mu_exp_map = -mc_scale * jnp.sum(jax.vmap(exp_loss)(v_samples), axis=0)
 
         return grad_mu_log_map + grad_mu_exp_map
 
-    def _m(self, mu: torch.Tensor, v: torch.Tensor, X: torch.Tensor) -> torch.Tensor:
+    def _m(self, mu: jnp.ndarray, v: jnp.ndarray) -> jnp.ndarray:
         """
         Compute the deformation of the metric at mu in the direction of v.
         Params:
-            mu (torch.Tensor): The mean of the distribution
-            v (torch.Tensor): The tangent vector v at the point mu
-            X (torch.Tensor): The data
+            mu (jnp.ndarray): The mean of the distribution
+            v (jnp.ndarray): The tangent vector v at the point mu
         Returns:
-            torch.Tensor: The square root of the metric determinant at exp_mu(v)
+            jnp.ndarray: The square root of the metric determinant at exp_mu(v)
         """
-        translated_point = exp_map(mu, v, self._metric)
+        translated_point = jax_exp_map(mu, v, self._metric)
         metric_translated_point = self._metric(translated_point)
-        return torch.sqrt(torch.linalg.det(metric_translated_point))
+        return jnp.sqrt(jnp.linalg.det(metric_translated_point))
 
     def _compute_grad_sigma(
         self,
-        mu: torch.Tensor,
-        A: torch.Tensor,
-        sigma: torch.Tensor,
-        X: torch.Tensor,
-        normalization_constant: torch.Tensor,
-    ) -> torch.Tensor:
+        mu: jnp.ndarray,
+        A: jnp.ndarray,
+        sigma: jnp.ndarray,
+        normalization_constant: jnp.ndarray,
+        key: jax.Array,
+        log_maps: jnp.ndarray,
+    ) -> jnp.ndarray:
         """
         Compute the gradient of the log-likelihood with respect to the precision factor A.
 
@@ -260,43 +289,41 @@ class LANDMLE:
         integral term for the normalization constant. The final gradient returned is with
         respect to the matrix A (where A.T @ A = inv(sigma)) through the chain rule.
         Params:
-            mu (torch.Tensor): The mean of the distribution
-            A (torch.Tensor): The A matrix of the distribution
-            sigma (torch.Tensor): The covariance of the distribution
-            X (torch.Tensor): The data
-            normalization_constant (torch.Tensor): The normalization constant of the distribution
+            mu (jnp.ndarray): The mean of the distribution
+            A (jnp.ndarray): The A matrix of the distribution
+            sigma (jnp.ndarray): The covariance of the distribution
+            normalization_constant (jnp.ndarray): The normalization constant of the distribution
+            key (jax.Array): Random key for operations
+            log_maps (jnp.ndarray): Pre-computed log maps of all data points at mu, shape (N, D)
         Returns:
-            torch.Tensor: The gradient of the log-likelihood with respect to A matrix
+            jnp.ndarray: The gradient of the log-likelihood with respect to A matrix
         """
-        grad_sigma_log_map = torch.zeros_like(sigma)
-        grad_sigma_exp_map = torch.zeros_like(sigma)
+        # Compute log_map part of the gradient (empirical outer product in tangent space)
+        grad_sigma_log_map = (log_maps.T @ log_maps) / log_maps.shape[0]
 
-        # Compute log_map part of the gradient
-        for x in X:
-            log_map_ = log_map(mu, x, self._metric)
-            grad_sigma_log_map += torch.outer(log_map_, log_map_)
-        grad_sigma_log_map /= X.shape[0]
-
-        # Compute exp_map part of the gradient
-        dist = torch.distributions.MultivariateNormal(
-            torch.zeros_like(mu), covariance_matrix=sigma
+        # Compute exp_map part of the gradient (MC estimate of normalization integral)
+        d = mu.shape[0]
+        v_samples = jax.random.multivariate_normal(
+            key, mean=jnp.zeros(d), cov=sigma, shape=(self.S,)
         )
-        vs = dist.sample((self.S,))
-        for v in vs:
-            grad_sigma_exp_map -= self._m(mu, v, X) * torch.outer(v, v)
+        mc_scale = jnp.sqrt((2 * jnp.pi) ** d * jnp.linalg.det(sigma)) / (
+            self.S * normalization_constant
+        )
 
-        grad_sigma_exp_map *= torch.sqrt(
-            (2 * torch.pi) ** mu.shape[0] * torch.linalg.det(sigma)
-        ) / (self.S * normalization_constant)
+        def exp_outer(v):
+            return self._m(mu, v) * jnp.outer(v, v)
 
+        grad_sigma_exp_map = -mc_scale * jnp.sum(jax.vmap(exp_outer)(v_samples), axis=0)
+
+        # Chain rule: gradient w.r.t. A from gradient w.r.t. sigma
         return A @ (grad_sigma_log_map + grad_sigma_exp_map)
 
-    def compute_A(self, sigma: torch.Tensor) -> torch.Tensor:
+    def compute_A(self, sigma: jnp.ndarray) -> jnp.ndarray:
         """
         Compute the A matrix from the covariance matrix, A.T @ A = inv(sigma)
         Params:
-            sigma (torch.Tensor): The covariance of the distribution
+            sigma (jnp.ndarray): The covariance of the distribution
         Returns:
-            torch.Tensor: The A matrix of the distribution
+            jnp.ndarray: The A matrix of the distribution
         """
-        return torch.linalg.cholesky(torch.linalg.inv(sigma)).T
+        return jnp.linalg.cholesky(jnp.linalg.inv(sigma)).T

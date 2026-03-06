@@ -1,9 +1,16 @@
+import jax
+import jax.numpy as jnp
 from functools import partial
 from sklearn.mixture import GaussianMixture
+from tqdm import tqdm
 
-import torch
+from utils import (
+    jax_exp_map,
+    jax_log_map_shooting,
+    compute_normalization_constant,
+    jax_metric,
+)
 
-from utils import exp_map, log_map, compute_normalization_constant, metric
 
 class LANDMixtureModel:
     def __init__(
@@ -15,7 +22,8 @@ class LANDMixtureModel:
         epsilon: float = 1e-3,
         sigma: float = 1.0,
         rho: float = 1e-3,
-        init_method: str = "mean"
+        init_method: str = "mean",
+        seed: int = 42,
     ):
         """
         Initialise the LAND Mixture Model (Algorithm 4)
@@ -27,6 +35,8 @@ class LANDMixtureModel:
             epsilon (float): The tolerance for the end condition
             sigma (float): Hyperparameter to compute the metric
             rho (float): Hyperparameter to compute the metric
+            init_method (str): Method to initialize params ("random", "mean", "GMM")
+            seed (int): The PRNG seed used for jax RNG initialization.
         """
         self.K = K
         self.lr_mu = lr_mu
@@ -38,208 +48,254 @@ class LANDMixtureModel:
         self._metric = None
 
         self.init_method = init_method
+        self.key = jax.random.key(seed)
 
-    def fit(self, X: torch.Tensor) -> tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], torch.Tensor]:
+    def fit(
+        self, X: jnp.ndarray
+    ) -> tuple[list[jnp.ndarray], list[jnp.ndarray], list[jnp.ndarray], jnp.ndarray]:
         """
         Fit the LAND mixture model to the data using Expectation-Maximisation
         Params:
-            X (torch.Tensor): The data to fit the model to, shape (N, D)
+            X (jnp.ndarray): The data to fit the model to, shape (N, D)
         Returns:
-            mu (list[torch.Tensor]): The means of the K distributions
-            sigma (list[torch.Tensor]): The covariances of the K distributions
-            C (list[torch.Tensor]): The normalisation constants
-            pi (torch.Tensor): The mixing weights
+            mu (list[jnp.ndarray]): The means of the K distributions
+            sigma (list[jnp.ndarray]): The covariances of the K distributions
+            C (list[jnp.ndarray]): The normalisation constants
+            pi (jnp.ndarray): The mixing weights
         """
-        self._metric = partial(metric, X=X, sigma=self.sigma, rho=self.rho)
+        self._metric = partial(jax_metric, X=X, sigma=self.sigma, rho=self.rho)
         N = X.shape[0]
+        log_map_vmap = jax.vmap(jax_log_map_shooting, in_axes=(None, 0, None))
 
         # Initialise the parameters
-        mu, A, sigma = self._init_params(X, method=self.init_method)
-        pi = torch.ones(self.K) / self.K
-        C = [compute_normalization_constant(mu[k], sigma[k], self._metric) for k in range(self.K)]
+        self.key, subkey = jax.random.split(self.key)
+        mu, A, sigma = self._init_params(X, key=subkey, method=self.init_method)
+        pi = jnp.ones(self.K) / self.K
+
+        C = []
+        for k in range(self.K):
+            self.key, subkey = jax.random.split(self.key)
+            C.append(
+                compute_normalization_constant(
+                    mu[k], sigma[k], self._metric, subkey, n_samples=self.S
+                )
+            )
 
         t = 0
         loss_diff = float("inf")
         prev_loss = float("inf")
+        current_loss = float("inf")
 
-        # Repeat (EM Loop)
-        while loss_diff**2 > self.epsilon:
-            
-            # Compute the responsibilities r_nk
-            r = torch.zeros((N, self.K))
-            for k in range(self.K):
-                inv_sigma = torch.linalg.inv(sigma[k])
-                for n, x in enumerate(X):
-                    lm = log_map(mu[k], x, self._metric)
-                    dist_sq = torch.dot(lm, inv_sigma @ lm)
-                    
+        with tqdm(desc="Mixture Model EM", unit="epoch") as pbar:
+            while loss_diff**2 > self.epsilon:
+                r = jnp.zeros((N, self.K))
+                log_maps_all = []
+                inv_sigmas = []
+
+                # E-step: compute responsibilities
+                for k in range(self.K):
+                    inv_sigma = jnp.linalg.inv(sigma[k])
+                    inv_sigmas.append(inv_sigma)
+
+                    log_maps = log_map_vmap(mu[k], X, self._metric)
+                    log_maps_all.append(log_maps)
+
+                    dist_sq = jnp.sum((log_maps @ inv_sigma) * log_maps, axis=-1)
+
                     # p_M(x_n | mu_k, Sigma_k)
-                    p_x = (1.0 / C[k]) * torch.exp(-0.5 * dist_sq)
-                    r[n, k] = pi[k] * p_x
+                    p_x = (1.0 / C[k]) * jnp.exp(-0.5 * dist_sq)
+                    r = r.at[:, k].set(pi[k] * p_x)
 
-            # Normalise responsibilities across components for each point
-            r_sum = r.sum(dim=1, keepdim=True)
-            
-            # Prevent division by zero in case of extreme outliers
-            r_sum = torch.clamp(r_sum, min=1e-12) 
-            r = r / r_sum
+                # Normalise responsibilities across components for each point
+                r_sum = r.sum(axis=1, keepdims=True)
+                r_sum = jnp.clip(r_sum, a_min=1e-12)
+                r = r / r_sum
 
-            # Calculate current negative log-likelihood to monitor convergence
-            current_loss = -torch.log(r_sum).sum() / N
-            if t > 0:
-                loss_diff = current_loss - prev_loss
-            prev_loss = current_loss
+                # Calculate current negative log-likelihood to monitor convergence
+                current_loss = -jnp.sum(jnp.log(r_sum)) / N
+                if t > 0:
+                    loss_diff = current_loss - prev_loss
+                prev_loss = current_loss
 
-            if loss_diff**2 <= self.epsilon and t > 0:
-                break
+                pbar.set_postfix(loss_diff=float(loss_diff), loss=float(current_loss))
+                pbar.update(1)
 
+                if loss_diff**2 <= self.epsilon and t > 0:
+                    break
 
-            # Maximisation step 
-            for k in range(self.K):
-                N_k = r[:, k].sum()
-                
-                # compute gradient for mu
-                grad_mu = self._compute_grad_mu_k(mu[k], sigma[k], X, C[k], r[:, k], N_k)
+                # M-step: update parameters for each component
+                for k in range(self.K):
+                    N_k = r[:, k].sum()
 
-                # update mu
-                mu[k] = exp_map(mu[k], self.lr_mu * grad_mu, self._metric)
+                    # Compute both gradients sharing MC samples
+                    self.key, subkey = jax.random.split(self.key)
+                    grad_mu, grad_sigma = self._compute_grads_k(
+                        mu[k],
+                        A[k],
+                        sigma[k],
+                        C[k],
+                        r[:, k],
+                        N_k,
+                        subkey,
+                        log_maps_all[k],
+                    )
 
-                # estimate C_k using eq. 16
-                C[k] = compute_normalization_constant(mu[k], sigma[k], self._metric)
+                    # update mu
+                    mu[k] = jax_exp_map(mu[k], self.lr_mu * grad_mu, self._metric)
 
-                # compute gradient for A using eq. 48
-                grad_sigma = self._compute_grad_sigma_k(mu[k], A[k], sigma[k], X, C[k], r[:, k], N_k)
+                    # estimate C_k using eq. 16
+                    self.key, subkey = jax.random.split(self.key)
+                    C[k] = compute_normalization_constant(
+                        mu[k], sigma[k], self._metric, subkey, n_samples=self.S
+                    )
 
-                # update A
-                A[k] -= self.lr_A * grad_sigma
+                    # update A
+                    A[k] -= self.lr_A * grad_sigma
 
-                # update Sigma
-                sigma[k] = torch.inverse(A[k].T @ A[k])
+                    # update Sigma
+                    sigma[k] = jnp.linalg.inv(A[k].T @ A[k])
 
-                # update pi
-                pi[k] = N_k / N
+                    # update pi
+                    pi = pi.at[k].set(N_k / N)
 
-            t += 1
+                t += 1
 
-        # self._metric = None  # avoid memory leak
+        self._metric = None  # avoid memory leak
         return mu, sigma, C, pi
 
-    def _init_params(self, X: torch.Tensor, method: str = "mean") -> tuple[list, list, list]:
+    def _init_params(
+        self, X: jnp.ndarray, key: jax.Array, method: str = "mean"
+    ) -> tuple[list, list, list]:
         """
         Initialise the parameters of the mixture model.
         Params:
-            X (torch.Tensor): The data to initialise the parameters with
+            X (jnp.ndarray): The data to initialise the parameters with
+            key (jax.Array): Setup key for random generations
             method (str): The method to use for initialisation.
                 - "random": Initialise mu by randomly selecting data points.
                 - "mean": Initialise mu near the empirical mean with slight noise.
                 - "GMM": Initialise mu with a Euclidean Gaussian Mixture Model.
         Returns:
-            mu (list[torch.Tensor]): The means of the distributions
-            A (list[torch.Tensor]): The A matrices of the distributions
-            sigma (list[torch.Tensor]): The covariances of the distributions
+            mu (list[jnp.ndarray]): The means of the distributions
+            A (list[jnp.ndarray]): The A matrices of the distributions
+            sigma (list[jnp.ndarray]): The covariances of the distributions
         """
         N = X.shape[0]
-        
+
         if method == "random":
             # Randomly select initial means from data points
-            indices = torch.randperm(N)[:self.K]
+            indices = jax.random.permutation(key, jnp.arange(N))[: self.K]
             mu = [X[idx].squeeze() for idx in indices]
-            
+
         elif method == "GMM":
             # Fit standard Euclidean GMM for a warm start
-            gmm = GaussianMixture(n_components=self.K, covariance_type='full', random_state=42)
-            gmm.fit(X.numpy())
-            mu = [torch.tensor(m, dtype=torch.float32) for m in gmm.means_]
-            
+            gmm = GaussianMixture(
+                n_components=self.K, covariance_type="full", random_state=42
+            )
+            import numpy as np
+
+            gmm.fit(np.array(X))
+            mu = [jnp.array(m, dtype=jnp.float32) for m in gmm.means_]
+
         elif method == "mean":
             # Calculate the global empirical mean
-            global_mean = torch.mean(X, dim=0)
-            
-            # Add small random noise to break symmetry. 
-            # If all K components start at the exact same coordinates, 
-            # they will compute identical gradients and never separate.
-            mu = [global_mean + 0.1 * torch.randn_like(global_mean) for _ in range(self.K)]
-            
+            global_mean = jnp.mean(X, axis=0)
+
+            # Add small random noise to break symmetry.
+            mu = []
+            for _ in range(self.K):
+                key, subkey = jax.random.split(key)
+                mu.append(
+                    global_mean + 0.1 * jax.random.normal(subkey, global_mean.shape)
+                )
+
         else:
             raise ValueError(f"Invalid initialisation method: {method}")
 
         A = []
         sigma = []
-        
+        log_map_vmap = jax.vmap(jax_log_map_shooting, in_axes=(None, 0, None))
+
         for k in range(self.K):
             # Calculate initial covariance from tangent vectors mapped from the new mean
-            tangent_vectors = torch.stack([log_map(mu[k], x, self._metric) for x in X])
-            sig = torch.cov(tangent_vectors.T)
-            
-            # Add a tiny ridge to the diagonal to ensure positive definiteness 
-            # and numerical stability during the first inversion
-            sig += torch.eye(sig.shape[0]) * 1e-6 
-            
+            tangent_vectors = log_map_vmap(mu[k], X, self._metric)
+            sig = jnp.cov(tangent_vectors.T)
+
+            # Add a tiny ridge to the diagonal to ensure positive definiteness
+            sig += jnp.eye(sig.shape[0]) * 1e-6
+
             sigma.append(sig)
             A.append(self.compute_A(sig))
-            
+
         return mu, A, sigma
 
+    def _compute_grads_k(
+        self,
+        mu: jnp.ndarray,
+        A: jnp.ndarray,
+        sigma: jnp.ndarray,
+        normalization_constant: jnp.ndarray,
+        r_k: jnp.ndarray,
+        N_k: jnp.ndarray,
+        key: jax.Array,
+        log_maps: jnp.ndarray,
+    ) -> tuple[jnp.ndarray, jnp.ndarray]:
+        """
+        Compute both the mu and sigma (A) gradients for a single component,
+        sharing MC samples and metric deformation evaluations.
+        Params:
+            mu (jnp.ndarray): Local component mean
+            A (jnp.ndarray): Local component precision factor (A.T @ A = inv(sigma))
+            sigma (jnp.ndarray): Local component covariance
+            normalization_constant (jnp.ndarray): Normalisation term evaluated at mu, sigma
+            r_k (jnp.ndarray): Responsibility of this component for each point
+            N_k (jnp.ndarray): Sum of responsibilities for this component
+            key (jax.Array): Random generation key
+            log_maps (jnp.ndarray): Precomputed evaluations of log_map_shooting, shape (N, D)
+        Returns:
+            grad_mu (jnp.ndarray): Gradient for mu
+            grad_A (jnp.ndarray): Gradient for A
+        """
+        # Gradient for mu: responsibility-weighted mean in tangent space
+        grad_mu_data = jnp.sum(r_k[:, None] * log_maps, axis=0) / N_k
+        # Gradient for sigma: responsibility-weighted outer product in tangent space
+        grad_sigma_data = ((log_maps * r_k[:, None]).T @ log_maps) / N_k
 
-    def _compute_grad_mu_k(
-        self, mu: torch.Tensor, sigma: torch.Tensor, X: torch.Tensor, 
-        normalization_constant: torch.Tensor, r_k: torch.Tensor, N_k: torch.Tensor
-    ) -> torch.Tensor:
-        """Weighted gradient computation for mu"""
-        grad_mu_log_map = torch.zeros_like(mu)
-        grad_mu_exp_map = torch.zeros_like(mu)
-
-        # Compute log_map part weighted by responsibilities
-        for n, x in enumerate(X):
-            grad_mu_log_map += r_k[n] * log_map(mu, x, self._metric)
-        grad_mu_log_map /= N_k
-
-        # Compute exp_map part (independent of empirical data weights)
-        dist = torch.distributions.MultivariateNormal(
-            torch.zeros_like(mu), covariance_matrix=sigma
+        # MC estimate of normalization integral
+        d = mu.shape[0]
+        v_samples = jax.random.multivariate_normal(
+            key, jnp.zeros(d), sigma, shape=(self.S,)
         )
-        for _ in range(self.S):
-            v = dist.sample()
-            grad_mu_exp_map -= self._m(mu, v, X) * v
-
-        grad_mu_exp_map *= torch.sqrt(
-            (2 * torch.pi) ** mu.shape[0] * torch.linalg.det(sigma)
-        ) / (self.S * normalization_constant)
-
-        return grad_mu_log_map + grad_mu_exp_map
-
-    def _compute_grad_sigma_k(
-        self, mu: torch.Tensor, A: torch.Tensor, sigma: torch.Tensor, X: torch.Tensor, 
-        normalization_constant: torch.Tensor, r_k: torch.Tensor, N_k: torch.Tensor
-    ) -> torch.Tensor:
-        """Weighted gradient computation for sigma"""
-        grad_sigma_log_map = torch.zeros_like(sigma)
-        grad_sigma_exp_map = torch.zeros_like(sigma)
-
-        # Compute log_map part weighted by responsibilities
-        for n, x in enumerate(X):
-            log_map_ = log_map(mu, x, self._metric)
-            grad_sigma_log_map += r_k[n] * torch.outer(log_map_, log_map_)
-        grad_sigma_log_map /= N_k
-
-        # Compute exp_map part
-        dist = torch.distributions.MultivariateNormal(
-            torch.zeros_like(mu), covariance_matrix=sigma
+        mc_scale = jnp.sqrt((2 * jnp.pi) ** d * jnp.linalg.det(sigma)) / (
+            self.S * normalization_constant
         )
-        vs = dist.sample((self.S,))
-        for v in vs:
-            grad_sigma_exp_map -= self._m(mu, v, X) * torch.outer(v, v)
+        m_values = jax.vmap(lambda v: self._m(mu, v))(v_samples)
 
-        grad_sigma_exp_map *= torch.sqrt(
-            (2 * torch.pi) ** mu.shape[0] * torch.linalg.det(sigma)
-        ) / (self.S * normalization_constant)
+        # Compute gradients
+        grad_mu_mc = -mc_scale * jnp.sum(m_values[:, None] * v_samples, axis=0)
 
-        return A @ (grad_sigma_log_map + grad_sigma_exp_map)
+        def weighted_outer(m_val, v):
+            return m_val * jnp.outer(v, v)
 
-    def _m(self, mu: torch.Tensor, v: torch.Tensor, X: torch.Tensor) -> torch.Tensor:
-        translated_point = exp_map(mu, v, self._metric)
+        grad_sigma_mc = -mc_scale * jnp.sum(
+            jax.vmap(weighted_outer)(m_values, v_samples), axis=0
+        )
+
+        grad_mu = grad_mu_data + grad_mu_mc
+        grad_A = A @ (grad_sigma_data + grad_sigma_mc)
+
+        return grad_mu, grad_A
+
+    def _m(self, mu: jnp.ndarray, v: jnp.ndarray) -> jnp.ndarray:
+        """
+        Compute the deformation of the metric at mu in the direction of v.
+        """
+        translated_point = jax_exp_map(mu, v, self._metric)
         metric_translated_point = self._metric(translated_point)
-        return torch.sqrt(torch.linalg.det(metric_translated_point))
+        return jnp.sqrt(jnp.linalg.det(metric_translated_point))
 
-    def compute_A(self, sigma: torch.Tensor) -> torch.Tensor:
-        return torch.linalg.cholesky(torch.linalg.inv(sigma)).T
+    def compute_A(self, sigma: jnp.ndarray) -> jnp.ndarray:
+        """
+        Compute the A matrix from the covariance matrix, A.T @ A = inv(sigma)
+        """
+        return jnp.linalg.cholesky(jnp.linalg.inv(sigma)).T
