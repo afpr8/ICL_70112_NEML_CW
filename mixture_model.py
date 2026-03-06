@@ -15,6 +15,7 @@ class LANDMixtureModel:
         epsilon: float = 1e-3,
         sigma: float = 1.0,
         rho: float = 1e-3,
+        init_method: str = "mean"
     ):
         """
         Initialise the LAND Mixture Model (Algorithm 4)
@@ -36,6 +37,8 @@ class LANDMixtureModel:
         self.rho = rho
         self._metric = None
 
+        self.init_method = init_method
+
     def fit(self, X: torch.Tensor) -> tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], torch.Tensor]:
         """
         Fit the LAND mixture model to the data using Expectation-Maximisation
@@ -51,7 +54,7 @@ class LANDMixtureModel:
         N = X.shape[0]
 
         # Initialise the parameters
-        mu, A, sigma = self._init_params(X)
+        mu, A, sigma = self._init_params(X, method=self.init_method)
         pi = torch.ones(self.K) / self.K
         C = [compute_normalization_constant(mu[k], sigma[k], self._metric) for k in range(self.K)]
 
