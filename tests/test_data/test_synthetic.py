@@ -4,7 +4,7 @@ import math
 
 import torch
 
-from data.synthetic import sample_non_linear_data
+from src.data.synthetic import sample_non_linear_data
 
 def test_shapes():
     n_samples = 100

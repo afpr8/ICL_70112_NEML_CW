@@ -3,12 +3,12 @@
 import numpy as np
 import pytest
 
-from data.physionet_eeg import (
+from src.data.physionet_eeg import (
     select_subjects,
     map_sleep_stage,
     subdivide_epoch,
     compute_log_spectrum,
-    apply_nmf
+    apply_nmf,
 )
 
 
