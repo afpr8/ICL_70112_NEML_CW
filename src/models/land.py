@@ -91,7 +91,7 @@ class LANDMLE:
 
         t = 0
         with tqdm(desc="LAND MLE Fit", unit=" epoch") as pbar:
-            while jnp.abs(loss_diff) > self.epsilon and t < 200:
+            while (jnp.abs(loss_diff)**2 > self.epsilon and t < 50) or t < 5:  # Ensure at least 5 epochs for some initial progress
                 # Store previous values
                 prev_sigma = sigma
                 prev_normalization_constant = normalization_constant
@@ -158,8 +158,6 @@ class LANDMLE:
                 pbar.update(1)
                 
                 t += 1
-                self.lr_mu *= 0.98
-                self.lr_A *= 0.98
 
         self._metric = None
         return mu, sigma, normalization_constant
@@ -182,7 +180,8 @@ class LANDMLE:
         
         # Ensure the layout is tight so labels aren't cut off
         plt.tight_layout()
-        plt.show()
+        plt.savefig(f"src/plots/land_loss_curve_{self.sigma}.png", dpi=300)
+        plt.close()
 
     def _init_params(
         self, X: jnp.ndarray, key: jax.Array, method: str = "mean", log_map_vmap=None
