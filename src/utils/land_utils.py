@@ -1,7 +1,9 @@
 # Utilities file for reusable functions for LAND algorithms
 
+# Standard library imports
 from typing import Callable
 
+# Third party imports
 import jax
 import jax.numpy as jnp
 import diffrax
@@ -69,19 +71,22 @@ def jax_exp_map(
         return jnp.concatenate([v_pt, a])
 
     term = diffrax.ODETerm(jax_vector_field)
-    solver = diffrax.Tsit5()
+    solver = diffrax.Dopri5() # Tried Tsit5()
     y0 = jnp.concatenate([x, v])
 
+
+    # Tried stepsize_controller=diffrax.PIDController(rtol=1e-5, atol=1e-5)
+    # Tried adjoint diffrax.RecursiveCheckpointAdjoint()
     sol = diffrax.diffeqsolve(
         term,
         solver,
         t0=0.0,  # Initial time at 0 (the base point)
         t1=1.0,  # Final time at 1 (the end of the geodesic)
-        dt0=0.1,  # TODO check other options and why
+        dt0=0.05,  # TODO check other options and why
         y0=y0,
         args=None,
         saveat=diffrax.SaveAt(t1=True),
-        stepsize_controller=diffrax.PIDController(rtol=1e-5, atol=1e-5),
+        stepsize_controller=diffrax.ConstantStepSize(),
         adjoint=diffrax.DirectAdjoint(),
     )
     d = x.shape[0]
@@ -94,16 +99,32 @@ def jax_log_map_shooting(
     x: jnp.ndarray,
     y_target: jnp.ndarray,
     metric_fn: Callable[[jnp.ndarray], jnp.ndarray],
+    max_steps: int = 100 # Tried 32, 50, 100, and 500
 ) -> jnp.ndarray:
+    """
+    Compute the Riemannian log map from x to y_target using a shooting method
+    with a Levenberg-Marquardt solver. This is a robust version with max_steps
+    and a fallback in case the solver fails.
+    """
     def residual(v, args):
         return jax_exp_map(x, v, metric_fn) - y_target
 
     solver = optx.LevenbergMarquardt(rtol=1e-5, atol=1e-5)
     v_guess = y_target - x
 
-    sol = optx.root_find(residual, solver, y0=v_guess, args=None)
+    sol = optx.root_find(
+        residual,
+        solver,
+        y0=v_guess,
+        args=None,
+        max_steps=max_steps,
+        throw=False
+    )
 
-    return sol.value
+    final_res_vector = residual(sol.value, None)
+    final_error = jnp.linalg.norm(final_res_vector)
+
+    return sol.value, final_error, sol.stats["num_steps"], sol.result
 
 
 @jax.jit(static_argnames=["metric_fn", "n_samples"])

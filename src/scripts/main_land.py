@@ -12,7 +12,8 @@ from src.utils.plotting_utils import plot_mixture_contours
 
 def get_geodesic_path(mu, x, metric_fn, steps=10):
     """
-    Computes a sequence of points along the geodesic from cluster mean (mu) to data point (x).
+    Computes a sequence of points along the geodesic from cluster mean (mu) to
+        data point (x)
     """
     v = jax_log_map_shooting(mu, x, metric_fn)
     path = []
@@ -47,25 +48,42 @@ def plot_geodesics(ax, X, mean, geodesics):
     for path in geodesics:
         ax.plot(path[:, 0], path[:, 1], 'k-', alpha=0.1)
         
-    ax.scatter([mean[0]], [mean[1]], c='red', marker='x', s=100, linewidth=2, label='LAND mean')
+    ax.scatter(
+        [mean[0]], [mean[1]],
+        c='red',
+        marker='x',
+        s=100,
+        linewidth=2,
+        label='LAND mean'
+    )
     ax.set_title('LAND Data to Mean Geodesics')
     ax.legend(loc='best')
     ax.axis('equal')
 
 def main():
-    # 1. Generate Non-Linear Data (One Moon usually better for a single component, but we'll use a single half-moon)
+    # 1. Generate Non-Linear Data (One Moon usually better for a single 
+    # component, but we'll use a single half-moon)
     X_np, true_labels = make_moons(n_samples=400, noise=0.1, random_state=42)
     # Just take one moon for a single LAND distribution
     X_np = X_np[true_labels == 0]
     X_tensor = jnp.array(X_np, dtype=jnp.float32)
     
     # Define hyperparams matching the LAND setup
-    sigma, rho = 1.0, 1e-3
+    sigma = 0.2 # Tried 0.3, 0.5, 0.6, 1.0, 5.0, 10.0
+    rho = 1e-4 # Tried 1e-3, 1e-2, 1e-1, 0.2
     metric_fn = partial(jax_metric, X=X_tensor, sigma=sigma, rho=rho)
 
     # 2. Fit LAND MLE Model
     print("Fitting LAND MLE Model...")
-    land = LANDMLE(initial_lr_mu=1e-2, initial_lr_A=1e-2, S=50, epsilon=1e-3, sigma=sigma, rho=rho)
+    land = LANDMLE(
+        initial_lr_mu=1e-2, # Tried 1e-3
+        initial_lr_A=1e-4, # Tried 5e-2, 1e-2, 1e-3
+        S=3000,
+        epsilon=1e-6,
+        sigma=sigma,
+        rho=rho,
+        init_method="mean" # Tried random
+    )
     land_mu, land_sigma, land_C = land.fit(X_tensor)
     
     # Convert LAND means to numpy for plotting
@@ -74,7 +92,7 @@ def main():
     # 3. Compute geodesics for LAND
     print("Computing geodesics...")
     geodesics = []
-    
+
     for x in X_tensor:
         # Generate the visual path
         path = get_geodesic_path(land_mu, x, metric_fn)
@@ -84,11 +102,14 @@ def main():
     print("Evaluating grid densities...")
     x_min, x_max = X_np[:, 0].min() - 0.5, X_np[:, 0].max() + 0.5
     y_min, y_max = X_np[:, 1].min() - 0.5, X_np[:, 1].max() + 0.5
-    xx, yy = np.meshgrid(np.linspace(x_min, x_max, 40), # Lower resolution (40x40) to save compute time
-                         np.linspace(y_min, y_max, 40)) 
-    
+    # Lower resolution (40x40) to save compute time
+    xx, yy = np.meshgrid(np.linspace(x_min, x_max, 20), 
+                         np.linspace(y_min, y_max, 20)) 
+
     # LAND Contours
-    Z_land = evaluate_land_density(xx, yy, land_mu, land_sigma, land_C, metric_fn)
+    Z_land = evaluate_land_density(
+        xx, yy, land_mu, land_sigma, land_C, metric_fn
+    )
 
     # 5. Visualise
     print("Plotting results...")
