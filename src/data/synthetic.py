@@ -6,13 +6,13 @@ import torch
 
 
 def sample_non_linear_data(
-        n_samples:int=300,
-        n_components:int=20,
-        x_rad:float=1,
-        y_rad:float=1,
-        std:float=0.15,
-        device="cpu"
-    ) -> list[tuple[float, float]]: 
+    n_samples: int = 300,
+    n_components: int = 20,
+    x_rad: float = 0.75,
+    y_rad: float = 1.5,
+    std: float = 0.15,
+    device="cpu",
+) -> list[tuple[float, float]]: 
     """
         Generate samples from a mixture of gaussian models centered along
         a half-ellipsoidal curve
