@@ -55,10 +55,10 @@ def plot_geodesics(ax, X, mean, geodesics):
 
 def main():
     # 1. Generate Non-Linear Data (One Moon usually better for a single component, but we'll use a single half-moon)
-    # X_np, true_labels = make_moons(n_samples=400, noise=0.1, random_state=42)
+    X_np, true_labels = make_moons(n_samples=400, noise=0.1, random_state=42)
     # Just take one moon for a single LAND distribution
-    # X_np = X_np[true_labels == 0]
-    X_np = generate_data(data_type=1, N=200, sigma=0.1)  # Using the first data type (half-moon with a hole)
+    X_np = X_np[true_labels == 0]
+    # X_np = generate_data(data_type=1, N=200, sigma=0.1)  # Using the first data type (half-moon with a hole)
     X_tensor = jnp.array(X_np, dtype=jnp.float32)
     
     # Define hyperparams matching the LAND setup
