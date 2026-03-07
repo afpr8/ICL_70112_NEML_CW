@@ -167,7 +167,7 @@ class LANDMLE:
                 
                 t += 1
                 self.lr_mu *= 0.95
-                self.lr_A *= 0.95
+                # self.lr_A *= 0.95
 
         self._metric = None
         return mu, sigma, normalization_constant
