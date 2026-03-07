@@ -60,12 +60,12 @@ def main():
     X_tensor = jnp.array(X_np, dtype=jnp.float32)
     
     # Define hyperparams matching the LAND setup
-    sigma, rho = 0.7, 5e-3
+    sigma, rho = 1, 5e-3
     metric_fn = partial(jax_metric, X=X_tensor, sigma=sigma, rho=rho)
 
     # 2. Fit LAND MLE Model
     print("Fitting LAND MLE Model...")
-    land = LANDMLE(initial_lr_mu=0.1, initial_lr_A=0.01, S=50, epsilon=1e-3, sigma=sigma, rho=rho)
+    land = LANDMLE(initial_lr_mu=1, initial_lr_A=0.01, S=50, epsilon=1e-3, sigma=sigma, rho=rho)
     land_mu, land_sigma, land_C = land.fit(X_tensor)
     land.plot_loss()
     land.plot_trajectory(X_tensor)
