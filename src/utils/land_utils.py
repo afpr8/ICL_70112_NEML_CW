@@ -69,7 +69,7 @@ def jax_exp_map(
         return jnp.concatenate([v_pt, a])
 
     term = diffrax.ODETerm(jax_vector_field)
-    solver = diffrax.Tsit5()
+    solver = diffrax.Euler()
     y0 = jnp.concatenate([x, v])
 
     sol = diffrax.diffeqsolve(
@@ -81,7 +81,7 @@ def jax_exp_map(
         y0=y0,
         args=None,
         saveat=diffrax.SaveAt(t1=True),
-        stepsize_controller=diffrax.PIDController(rtol=1e-5, atol=1e-5),
+        stepsize_controller=diffrax.ConstantStepSize(),
         adjoint=diffrax.DirectAdjoint(),
     )
     d = x.shape[0]
