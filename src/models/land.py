@@ -2,6 +2,7 @@ import jax
 import jax.numpy as jnp
 from functools import partial
 from tqdm import tqdm
+import matplotlib.pyplot as plt
 
 from src.utils.land_utils import (
     compute_normalization_constant,
@@ -30,7 +31,7 @@ class LANDMLE:
         epsilon: float = 1e-3,
         sigma: float = 1.0,  # Set to 1.0 in the original paper and tested from 0.5 to 1.5
         rho: float = 1e-3,
-        init_method: str = "mean",
+        init_method: str = "random",
         seed: int = 42,
     ):
         """
@@ -75,6 +76,7 @@ class LANDMLE:
             normalization_constant (jnp.ndarray): The normalization constant of the distribution
         """
         self._metric = partial(jax_metric, X=X, sigma=self.sigma, rho=self.rho)
+        self.loss_history = []
         # Cache the vmapped log_map_shooting for reuse every iteration
         log_map_vmap = jax.vmap(jax_log_map_shooting, in_axes=(None, 0, None))
 
@@ -87,8 +89,9 @@ class LANDMLE:
         )
         loss_diff = float("inf")
 
-        with tqdm(desc="LAND MLE Fit", unit="epoch") as pbar:
-            while loss_diff**2 > self.epsilon:
+        t = 0
+        with tqdm(desc="LAND MLE Fit", unit=" epoch") as pbar:
+            while jnp.abs(loss_diff) > self.epsilon and t < 200:
                 # Store previous values
                 prev_sigma = sigma
                 prev_normalization_constant = normalization_constant
@@ -96,6 +99,10 @@ class LANDMLE:
                 # Compute log_maps once, reused by loss, grad_mu, and grad_sigma
                 log_maps = log_map_vmap(mu, X, self._metric)
                 prev_loss = self._loss(sigma, log_maps, normalization_constant)
+                
+                # Capture the initial loss on the very first epoch
+                if t == 0:
+                    self.loss_history.append(float(prev_loss))
 
                 # Update mu
                 self.key, subkey = jax.random.split(self.key)
@@ -104,9 +111,9 @@ class LANDMLE:
                 )
                 mu = jax_exp_map(
                     mu, self.lr_mu * grad_mu, self._metric
-                )  # grad_mu already has the -1 factor
+                )
 
-                self.key, subkey = jax.random.split(self.key)
+                # self.key, subkey = jax.random.split(self.key)
                 normalization_constant = compute_normalization_constant(
                     mu, sigma, self._metric, subkey, self.S
                 )
@@ -116,13 +123,10 @@ class LANDMLE:
                 loss_diff = (
                     self._loss(sigma, log_maps, normalization_constant) - prev_loss
                 )
-                if loss_diff > 0:
-                    self.lr_mu *= self.lr_scale_down
-                else:
-                    self.lr_mu *= self.lr_scale_up
+                
 
                 # Update sigma
-                self.key, subkey = jax.random.split(self.key)
+                # self.key, subkey = jax.random.split(self.key)
                 grad_sigma = self._compute_grad_sigma(
                     mu, A, sigma, normalization_constant, subkey, log_maps
                 )
@@ -130,13 +134,15 @@ class LANDMLE:
                 sigma = jnp.linalg.inv(A.T @ A)
 
                 prev_normalization_constant = normalization_constant
-                self.key, subkey = jax.random.split(self.key)
+                # self.key, subkey = jax.random.split(self.key)
                 normalization_constant = compute_normalization_constant(
                     mu, sigma, self._metric, subkey, self.S
                 )
 
-                # log_maps at new mu haven't changed from the post-mu-update vmap above
+                # Calculate new loss and append to history
                 new_loss = self._loss(sigma, log_maps, normalization_constant)
+                self.loss_history.append(float(new_loss))
+                
                 # Scale lr_A: compare new sigma loss against previous sigma
                 loss_diff_A = new_loss - self._loss(
                     prev_sigma, log_maps, prev_normalization_constant
@@ -150,9 +156,33 @@ class LANDMLE:
 
                 pbar.set_postfix(loss_diff=float(loss_diff), loss=float(new_loss))
                 pbar.update(1)
+                
+                t += 1
+                self.lr_mu *= 0.98
+                self.lr_A *= 0.98
 
         self._metric = None
         return mu, sigma, normalization_constant
+
+    def plot_loss(self):
+        """
+        Plot the empirical risk (negative log-likelihood) over the training epochs.
+        """
+        if not hasattr(self, 'loss_history') or not self.loss_history:
+            print("No loss history found. Please run fit() first.")
+            return
+
+        plt.figure(figsize=(10, 6))
+        plt.plot(self.loss_history, marker='o', linestyle='-', color='#CD5C5C', markersize=4)
+        
+        plt.title('LAND MLE Training Loss Curve', fontsize=14, fontweight='bold')
+        plt.xlabel('Epoch', fontsize=12)
+        plt.ylabel('Negative Log-Likelihood', fontsize=12)
+        plt.grid(True, linestyle='--', alpha=0.7)
+        
+        # Ensure the layout is tight so labels aren't cut off
+        plt.tight_layout()
+        plt.show()
 
     def _init_params(
         self, X: jnp.ndarray, key: jax.Array, method: str = "mean", log_map_vmap=None

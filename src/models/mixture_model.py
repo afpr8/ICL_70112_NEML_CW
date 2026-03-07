@@ -87,8 +87,8 @@ class LANDMixtureModel:
         prev_loss = float("inf")
         current_loss = float("inf")
 
-        with tqdm(desc="Mixture Model EM", unit="epoch") as pbar:
-            while loss_diff**2 > self.epsilon:
+        with tqdm(desc="Mixture Model EM", unit=" epoch") as pbar:
+            while jnp.abs(loss_diff) > self.epsilon:
                 r = jnp.zeros((N, self.K))
                 log_maps_all = []
                 inv_sigmas = []
@@ -121,7 +121,7 @@ class LANDMixtureModel:
                 pbar.set_postfix(loss_diff=float(loss_diff), loss=float(current_loss))
                 pbar.update(1)
 
-                if loss_diff**2 <= self.epsilon and t > 0:
+                if jnp.abs(loss_diff) <= self.epsilon and t > 0:
                     break
 
                 # M-step: update parameters for each component

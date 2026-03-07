@@ -65,7 +65,7 @@ def main():
 
     # 3. Fit LAND Mixture Model
     print("Fitting LAND Mixture Model...")
-    land = LANDMixtureModel(K=2, lr_mu=1e-2, lr_A=1e-2, S=50, epsilon=1e-3, sigma=sigma, rho=rho)
+    land = LANDMixtureModel(K=2, lr_mu=1e-2, lr_A=1e-2, S=50, epsilon=1e-3, sigma=sigma, rho=rho, init_method="GMM")
     land_mu, land_sigma, land_C, land_pi = land.fit(X_tensor)
     
     # Convert LAND means to numpy for plotting
