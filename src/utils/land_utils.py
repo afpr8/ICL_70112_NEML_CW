@@ -101,7 +101,7 @@ def jax_log_map_shooting(
     solver = optx.LevenbergMarquardt(rtol=1e-5, atol=1e-5)
     v_guess = y_target - x
 
-    sol = optx.root_find(residual, solver, y0=v_guess, args=None, throw=False, maxiter=1000)
+    sol = optx.root_find(residual, solver, y0=v_guess, args=None, throw=False)
 
     return sol.value
 

@@ -60,7 +60,7 @@ def main():
     X_tensor = jnp.array(X_np, dtype=jnp.float32)
     
     # Define hyperparams matching the LAND setup
-    sigma, rho = 1.0, 1e-3
+    sigma, rho = 0.05, 1e-3
     metric_fn = partial(jax_metric, X=X_tensor, sigma=sigma, rho=rho)
 
     # 2. Fit LAND MLE Model
