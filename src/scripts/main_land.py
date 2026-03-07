@@ -68,6 +68,7 @@ def main():
     land = LANDMLE(initial_lr_mu=1e-2, initial_lr_A=1e-2, S=50, epsilon=1e-3, sigma=sigma, rho=rho)
     land_mu, land_sigma, land_C = land.fit(X_tensor)
     land.plot_loss()
+    land.plot_trajectory(X_tensor)
     # Convert LAND means to numpy for plotting
     land_means_np = np.array(land_mu).reshape(1, -1)
 

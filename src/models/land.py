@@ -3,6 +3,7 @@ import jax.numpy as jnp
 from functools import partial
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+import numpy as np
 
 from src.utils.land_utils import (
     compute_normalization_constant,
@@ -77,11 +78,15 @@ class LANDMLE:
         """
         self._metric = partial(jax_metric, X=X, sigma=self.sigma, rho=self.rho)
         self.loss_history = []
+        self.mu_history = []
+
         # Cache the vmapped log_map_shooting for reuse every iteration
         log_map_vmap = jax.vmap(jax_log_map_shooting, in_axes=(None, 0, None))
 
         self.key, subkey = jax.random.split(self.key)
         mu, A, sigma = self._init_params(X, subkey, self.init_method, log_map_vmap)
+
+        self.mu_history.append(np.array(mu))
 
         self.key, subkey = jax.random.split(self.key)
         normalization_constant = compute_normalization_constant(
@@ -112,6 +117,9 @@ class LANDMLE:
                 mu = jax_exp_map(
                     mu, self.lr_mu * grad_mu, self._metric
                 )
+
+                # Store mu history for visualization
+                self.mu_history.append(np.array(mu))
 
                 # self.key, subkey = jax.random.split(self.key)
                 normalization_constant = compute_normalization_constant(
@@ -181,6 +189,43 @@ class LANDMLE:
         # Ensure the layout is tight so labels aren't cut off
         plt.tight_layout()
         plt.savefig(f"src/plots/land_loss_curve_{self.sigma}.png", dpi=300)
+        plt.close()
+
+    def plot_trajectory(self, X: jnp.ndarray, filename: str = "src/plots/land_trajectory.png"):
+        """
+        Visualise and save the trajectory of the spatial mean (mu) across the manifold.
+        """
+        if not hasattr(self, 'mu_history') or not self.mu_history:
+            print("No trajectory history found. Please run fit() first.")
+            return
+
+        
+        # Convert the history list to a 2D NumPy array for easy coordinate slicing
+        trajectory = np.array(self.mu_history)
+
+        plt.figure(figsize=(10, 8))
+        
+        # 1. Plot the background dataset
+        plt.scatter(X[:, 0], X[:, 1], c='dodgerblue', alpha=0.5, s=30, label='Data')
+        
+        # 2. Draw the connected path of the mean
+        plt.plot(trajectory[:, 0], trajectory[:, 1], c='crimson', linestyle='-', linewidth=2, alpha=0.8, label='Trajectory')
+        
+        # 3. Mark every individual epoch step along the path
+        plt.scatter(trajectory[:, 0], trajectory[:, 1], c='crimson', s=15, zorder=5)
+        
+        # 4. Highlight the exact start and end coordinates
+        plt.scatter(trajectory[0, 0], trajectory[0, 1], c='gold', edgecolors='black', marker='s', s=100, label='Start', zorder=6)
+        plt.scatter(trajectory[-1, 0], trajectory[-1, 1], c='limegreen', edgecolors='black', marker='*', s=200, label='End', zorder=6)
+
+        plt.title(f'LAND MLE Mean Trajectory (sigma = {self.sigma})', fontsize=14, fontweight='bold')
+        plt.xlabel('Dimension 1', fontsize=12)
+        plt.ylabel('Dimension 2', fontsize=12)
+        plt.legend(loc='best')
+        plt.grid(True, linestyle='--', alpha=0.6)
+        
+        plt.tight_layout()
+        plt.savefig(filename, dpi=300)
         plt.close()
 
     def _init_params(
