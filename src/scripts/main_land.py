@@ -85,8 +85,8 @@ def main():
     print("Evaluating grid densities...")
     x_min, x_max = X_np[:, 0].min() - 0.5, X_np[:, 0].max() + 0.5
     y_min, y_max = X_np[:, 1].min() - 0.5, X_np[:, 1].max() + 0.5
-    xx, yy = np.meshgrid(np.linspace(x_min, x_max, 40), # Lower resolution (40x40) to save compute time
-                         np.linspace(y_min, y_max, 40)) 
+    xx, yy = np.meshgrid(np.linspace(x_min, x_max, 30), # Lower resolution (40x40) to save compute time
+                         np.linspace(y_min, y_max, 30)) 
     
     # LAND Contours
     Z_land = evaluate_land_density(xx, yy, land_mu, land_sigma, land_C, metric_fn)

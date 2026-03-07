@@ -24,8 +24,8 @@ class LANDMLE:
 
     def __init__(
         self,
-        initial_lr_mu: float = 1e-3,
-        initial_lr_A: float = 1e-3,
+        initial_lr_mu: float = 0.1,
+        initial_lr_A: float = 0.01,
         S: int = 3000,  # 3000 as in the original LAND paper
         lr_scale_down: float = 0.75,  # 0.75 as in the original LAND paper
         lr_scale_up: float = 1.1,  # 1.1 as in the original LAND paper
@@ -166,6 +166,8 @@ class LANDMLE:
                 pbar.update(1)
                 
                 t += 1
+                self.lr_mu *= 0.95
+                self.lr_A *= 0.95
 
         self._metric = None
         return mu, sigma, normalization_constant
