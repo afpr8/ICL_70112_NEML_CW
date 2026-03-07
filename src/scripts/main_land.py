@@ -6,6 +6,7 @@ from sklearn.datasets import make_moons
 from functools import partial
 
 # Import your custom modules here
+from src.data.synthetic import generate_data
 from src.models.land import LANDMLE
 from src.utils.land_utils import jax_log_map_shooting, jax_exp_map, jax_metric
 from src.utils.plotting_utils import plot_mixture_contours
@@ -54,18 +55,19 @@ def plot_geodesics(ax, X, mean, geodesics):
 
 def main():
     # 1. Generate Non-Linear Data (One Moon usually better for a single component, but we'll use a single half-moon)
-    X_np, true_labels = make_moons(n_samples=400, noise=0.1, random_state=42)
+    # X_np, true_labels = make_moons(n_samples=400, noise=0.1, random_state=42)
     # Just take one moon for a single LAND distribution
-    X_np = X_np[true_labels == 0]
+    # X_np = X_np[true_labels == 0]
+    X_np = generate_data(data_type=1, N=200, sigma=0.1)  # Using the first data type (half-moon with a hole)
     X_tensor = jnp.array(X_np, dtype=jnp.float32)
     
     # Define hyperparams matching the LAND setup
-    sigma, rho = 0.3, 1e-4
+    sigma, rho = 0.15, 1e-2
     metric_fn = partial(jax_metric, X=X_tensor, sigma=sigma, rho=rho)
 
     # 2. Fit LAND MLE Model
     print("Fitting LAND MLE Model...")
-    land = LANDMLE(initial_lr_mu=0.3, initial_lr_A=0.3, S=50, epsilon=1e-3, sigma=sigma, rho=rho)
+    land = LANDMLE(initial_lr_mu=0.3, initial_lr_A=0.3, S=50, epsilon=1e-1, sigma=sigma, rho=rho)
     land_mu, land_sigma, land_C = land.fit(X_tensor)
     land.plot_loss()
     land.plot_trajectory(X_tensor)

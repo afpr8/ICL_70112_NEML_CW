@@ -1,9 +1,46 @@
 # Code to generate synthetic data for evaluating LAND
 
 import math
-
+import numpy as np
+from sklearn.metrics import pairwise_distances
 import torch
 
+def generate_data(data_type: int, N: int, sigma: float = 0.1, r: float = 0.5) -> np.ndarray:
+    # The semi-circle data in 2D
+    if data_type == 1:
+        theta = np.pi * np.random.rand(N, 1)
+        data = np.concatenate((np.cos(theta), np.sin(theta)), axis=1) + sigma * np.random.randn(N, 2)
+        return data
+
+    # A simple 2-dim surface in 3D with a hole in the middle
+    elif data_type == 2:
+        Z = np.random.rand(N, 2)
+        Z = Z - np.mean(Z, 0).reshape(1, -1)
+        Centers = np.zeros((1, 2))
+        dists = pairwise_distances(Z, Centers)  # The sqrt(|x|)
+        inds_rem = (dists <= r).sum(axis=1)  # N x 1, The points within the ball
+        Z_ = Z[inds_rem == 0, :]  # Keep the points OUTSIDE of the ball
+        F = (np.sin(2 * np.pi * Z_[:, 0])).reshape(-1, 1)
+        F = F + sigma * np.random.randn(F.shape[0], 1)
+        data = np.concatenate((Z_, 0.25 * F), axis=1)
+        return data
+
+    # Two moons on a surface and with extra noisy dimensions
+    elif data_type == 3:
+        N_half = N// 2
+        theta = np.pi * np.random.rand(N, 1)
+        z1 = np.concatenate((np.cos(theta), np.sin(theta)), axis=1)
+        z2 = np.concatenate((np.cos(theta), -np.sin(theta)), axis=1) + np.array([1.0, 0.25]).reshape(1, -1)
+        z = np.concatenate((z1, z2), axis=0) + sigma * np.random.randn(int(N * 2), 2)
+        z = z - z.mean(0).reshape(1, -1)
+        z3 = (np.sin(np.pi * z[:, 0])).reshape(-1, 1)
+        z3 = z3 + sigma * np.random.randn(z3.shape[0], 1)
+        data = np.concatenate((z, 0.5 * z3), axis=1)
+
+        labels = np.concatenate((0 * np.ones((z1.shape[0], 1)), np.ones((z2.shape[0], 1))), axis=0)
+        return data, labels
+
+    return -1
 
 def sample_non_linear_data(
         n_samples:int=300,

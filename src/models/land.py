@@ -96,7 +96,7 @@ class LANDMLE:
 
         t = 0
         with tqdm(desc="LAND MLE Fit", unit=" epoch") as pbar:
-            while (loss_diff**2 > self.epsilon) or t < 200:  # Ensure at least 5 epochs for some initial progress
+            while ((loss_diff**2 > self.epsilon) or t < 20) and t < 100: # TODO put args for max and min epochs
                 # Store previous values
                 prev_sigma = sigma
                 prev_normalization_constant = normalization_constant
