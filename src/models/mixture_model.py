@@ -75,7 +75,7 @@ class LANDMixtureModel:
             C.append(
                 manifold.compute_normalization_constant(
                     mu[k], sigma[k], subkey, n_samples=self.S
-                )
+                )[0]
             )
 
         t = 0
@@ -145,7 +145,7 @@ class LANDMixtureModel:
                     self.key, subkey = jax.random.split(self.key)
                     C[k] = manifold.compute_normalization_constant(
                         mu[k], sigma[k], subkey, n_samples=self.S
-                    )
+                    )[0]
 
                     # update A
                     A[k] -= self.lr_A * grad_sigma

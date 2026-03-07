@@ -223,7 +223,7 @@ class RiemannianManifold:
         sigma: jnp.ndarray,
         key: jax.Array,
         n_samples: int = 3000,
-    ) -> jnp.ndarray:
+    ) -> tuple[jnp.ndarray, jnp.ndarray]:
         d = mu.shape[0]
         Z = jnp.sqrt((2 * jnp.pi) ** d * jnp.linalg.det(sigma))
 
@@ -238,4 +238,4 @@ class RiemannianManifold:
             return jnp.exp(0.5 * log_det)
 
         vols = jax.vmap(compute_vol)(v_samples)
-        return Z * jnp.mean(vols)
+        return Z * jnp.mean(vols), v_samples

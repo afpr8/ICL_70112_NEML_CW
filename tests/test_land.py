@@ -21,7 +21,10 @@ def mock_manifold():
     manifold.exp_map.return_value = jnp.zeros(2)
     manifold.metric.return_value = jnp.eye(2)
     manifold.log_map_batch.return_value = jnp.ones((5, 2))
-    manifold.compute_normalization_constant.return_value = jnp.array(1.0)
+    manifold.compute_normalization_constant.return_value = (
+        jnp.array(1.0),
+        jnp.ones((10, 2)),
+    )
     return manifold
 
 
@@ -88,10 +91,13 @@ def test_compute_grad_mu(land_model, dummy_data, mock_manifold):
     mu = jnp.zeros(2)
     sigma = jnp.eye(2)
     normalization_constant = jnp.array(1.0)
+    v_samples = jax.random.multivariate_normal(
+        key, mean=mu, cov=sigma, shape=(land_model.S,)
+    )
     log_maps = jnp.ones((dummy_data.shape[0], 2))
 
     grad = land_model._compute_grad_mu(
-        mu, sigma, normalization_constant, key, log_maps, mock_manifold
+        mu, sigma, normalization_constant, v_samples, key, log_maps, mock_manifold
     )
     assert grad.shape == mu.shape
 
@@ -102,11 +108,21 @@ def test_compute_grad_sigma(land_model, dummy_data, mock_manifold):
     A = jnp.eye(2)
     sigma = jnp.eye(2)
     normalization_constant = jnp.array(1.0)
+    v_samples = jax.random.multivariate_normal(
+        key, mean=mu, cov=sigma, shape=(land_model.S,)
+    )
     log_maps = jnp.ones((dummy_data.shape[0], 2))
 
     try:
         grad = land_model._compute_grad_sigma(
-            mu, A, sigma, normalization_constant, key, log_maps, mock_manifold
+            mu,
+            A,
+            sigma,
+            normalization_constant,
+            v_samples,
+            key,
+            log_maps,
+            mock_manifold,
         )
         assert grad.shape == sigma.shape
     except Exception as e:
