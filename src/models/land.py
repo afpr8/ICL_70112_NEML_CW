@@ -24,8 +24,8 @@ class LANDMLE:
 
     def __init__(
         self,
-        initial_lr_mu: float = 0.1,
-        initial_lr_A: float = 0.01,
+        initial_lr_mu: float = 1e-3,
+        initial_lr_A: float = 1e-3,
         S: int = 3000,  # 3000 as in the original LAND paper
         lr_scale_down: float = 0.75,  # 0.75 as in the original LAND paper
         lr_scale_up: float = 1.1,  # 1.1 as in the original LAND paper
