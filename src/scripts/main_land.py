@@ -99,7 +99,9 @@ def main():
                           title='LAND MLE PDF', mean_label='LAND mean')
     
     plt.tight_layout()
+    plt.savefig("src/plots/land_geodesics_and_contours.png", dpi=300)
     plt.show()
+    
 
 if __name__ == "__main__":
     main()
