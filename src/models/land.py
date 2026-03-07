@@ -1,14 +1,9 @@
 import jax
 import jax.numpy as jnp
-from functools import partial
 from tqdm import tqdm
+import numpy as np
 
-from src.utils.land_utils import (
-    compute_normalization_constant,
-    jax_exp_map,
-    jax_log_map_shooting,
-    jax_metric,
-)
+from src.utils.land_utils import RiemannianManifold, compute_knn_initial_path
 
 
 class LANDMLE:
@@ -30,6 +25,7 @@ class LANDMLE:
         epsilon: float = 1e-3,
         sigma: float = 1.0,  # Set to 1.0 in the original paper and tested from 0.5 to 1.5
         rho: float = 1e-3,
+        K_segments: int = 5,
         init_method: str = "mean",
         seed: int = 42,
     ):
@@ -44,6 +40,7 @@ class LANDMLE:
             epsilon (float): The tolerance for the end condition
             sigma (float): Hyperparameter to compute the metric
             rho (float): Hyperparameter to compute the metric
+            K_segments (int): The number of segments to use for the initial path
             init_method (str): The method to use for initialization.
                 - "random": Initialize mu randomly, sigma from empirical cov of tangent vectors.
                 - "mean": Initialize mu as the empirical mean, sigma from empirical cov of tangent vectors.
@@ -56,13 +53,11 @@ class LANDMLE:
         self.lr_scale_up = lr_scale_up
         self.S = S
         self.epsilon = epsilon
-
         self.sigma = sigma
         self.rho = rho
-
+        self.K_segments = K_segments
         self.init_method = init_method
         self.key = jax.random.key(seed)
-        self._metric = None
 
     def fit(self, X: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
         """
@@ -74,48 +69,39 @@ class LANDMLE:
             sigma (jnp.ndarray): The covariance of the distribution
             normalization_constant (jnp.ndarray): The normalization constant of the distribution
         """
-        self._metric = partial(jax_metric, X=X, sigma=self.sigma, rho=self.rho)
-        # Cache the vmapped log_map_shooting for reuse every iteration
-        log_map_vmap = jax.vmap(jax_log_map_shooting, in_axes=(None, 0, None))
+        manifold = RiemannianManifold(X, self.sigma, self.rho, self.K_segments)
 
         self.key, subkey = jax.random.split(self.key)
-        mu, A, sigma = self._init_params(X, subkey, self.init_method, log_map_vmap)
+        mu, A, sigma = self._init_params(X, subkey, self.init_method, manifold)
 
         self.key, subkey = jax.random.split(self.key)
-        normalization_constant = compute_normalization_constant(
-            mu, sigma, self._metric, subkey, self.S
-        )
+        norm_const = manifold.compute_normalization_constant(mu, sigma, subkey, self.S)
         loss_diff = float("inf")
 
         with tqdm(desc="LAND MLE Fit", unit="epoch") as pbar:
             while loss_diff**2 > self.epsilon:
                 # Store previous values
                 prev_sigma = sigma
-                prev_normalization_constant = normalization_constant
+                prev_norm_const = norm_const
 
-                # Compute log_maps once, reused by loss, grad_mu, and grad_sigma
-                log_maps = log_map_vmap(mu, X, self._metric)
-                prev_loss = self._loss(sigma, log_maps, normalization_constant)
+                log_maps = self._compute_log_maps(mu, X, manifold)
+                prev_loss = self._loss(sigma, log_maps, norm_const)
 
                 # Update mu
                 self.key, subkey = jax.random.split(self.key)
                 grad_mu = self._compute_grad_mu(
-                    mu, sigma, normalization_constant, subkey, log_maps
+                    mu, sigma, norm_const, subkey, log_maps, manifold
                 )
-                mu = jax_exp_map(
-                    mu, self.lr_mu * grad_mu, self._metric
-                )  # grad_mu already has the -1 factor
+                mu = manifold.exp_map(mu, self.lr_mu * grad_mu)
 
                 self.key, subkey = jax.random.split(self.key)
-                normalization_constant = compute_normalization_constant(
-                    mu, sigma, self._metric, subkey, self.S
+                norm_const = manifold.compute_normalization_constant(
+                    mu, sigma, subkey, self.S
                 )
 
-                # Scale lr_mu: shrink if loss increased, grow if it decreased
-                log_maps = log_map_vmap(mu, X, self._metric)
-                loss_diff = (
-                    self._loss(sigma, log_maps, normalization_constant) - prev_loss
-                )
+                # Scale lr_mu
+                log_maps = self._compute_log_maps(mu, X, manifold)
+                loss_diff = self._loss(sigma, log_maps, norm_const) - prev_loss
                 if loss_diff > 0:
                     self.lr_mu *= self.lr_scale_down
                 else:
@@ -124,22 +110,21 @@ class LANDMLE:
                 # Update sigma
                 self.key, subkey = jax.random.split(self.key)
                 grad_sigma = self._compute_grad_sigma(
-                    mu, A, sigma, normalization_constant, subkey, log_maps
+                    mu, A, sigma, norm_const, subkey, log_maps, manifold
                 )
                 A = A - self.lr_A * grad_sigma
                 sigma = jnp.linalg.inv(A.T @ A)
 
-                prev_normalization_constant = normalization_constant
+                prev_norm_const = norm_const
                 self.key, subkey = jax.random.split(self.key)
-                normalization_constant = compute_normalization_constant(
-                    mu, sigma, self._metric, subkey, self.S
+                norm_const = manifold.compute_normalization_constant(
+                    mu, sigma, subkey, self.S
                 )
 
-                # log_maps at new mu haven't changed from the post-mu-update vmap above
-                new_loss = self._loss(sigma, log_maps, normalization_constant)
-                # Scale lr_A: compare new sigma loss against previous sigma
+                # Scale lr_A
+                new_loss = self._loss(sigma, log_maps, norm_const)
                 loss_diff_A = new_loss - self._loss(
-                    prev_sigma, log_maps, prev_normalization_constant
+                    prev_sigma, log_maps, prev_norm_const
                 )
                 if loss_diff_A > 0:
                     self.lr_A *= self.lr_scale_down
@@ -151,11 +136,21 @@ class LANDMLE:
                 pbar.set_postfix(loss_diff=float(loss_diff), loss=float(new_loss))
                 pbar.update(1)
 
-        self._metric = None
-        return mu, sigma, normalization_constant
+        return mu, sigma, norm_const
+
+    def _compute_log_maps(
+        self, mu: jnp.ndarray, X: jnp.ndarray, manifold: RiemannianManifold
+    ) -> jnp.ndarray:
+        m_np = np.array(mu)
+        X_np = np.array(X)
+        paths = [
+            compute_knn_initial_path(m_np, X_np[i], X_np, N_points=self.K_segments + 1)
+            for i in range(X_np.shape[0])
+        ]
+        return manifold.log_map_batch(mu, X, jnp.array(paths))
 
     def _init_params(
-        self, X: jnp.ndarray, key: jax.Array, method: str = "mean", log_map_vmap=None
+        self, X: jnp.ndarray, key: jax.Array, method: str, manifold: RiemannianManifold
     ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
         """
         Initialize the parameters of the model
@@ -166,7 +161,7 @@ class LANDMLE:
                 - "random": Initialize mu randomly, sigma from empirical cov of tangent vectors.
                 - "mean": Initialize mu as the empirical mean, sigma from empirical cov of tangent vectors.
                 - "GMM": Initialize mu and sigma with a Gaussian Mixture Model.
-            log_map_vmap: Pre-built vmap of jax_log_map_shooting for efficiency.
+            log_map_batch: Pre-built batch compute log_map function for efficiency.
         Returns:
             mu (jnp.ndarray): The mean of the distribution
             A (jnp.ndarray): The A matrix of the distribution
@@ -175,26 +170,23 @@ class LANDMLE:
         if method == "random":
             mu = X[jax.random.randint(key, (1,), 0, X.shape[0])].squeeze()
         elif method == "mean":
-            mu = jnp.mean(X, axis=0)
+            # Start at the data point closest to the Euclidean mean to ensure it lies on the manifold
+            euclidean_mean = jnp.mean(X, axis=0)
+            closest_idx = jnp.argmin(jnp.sum((X - euclidean_mean) ** 2, axis=1))
+            mu = X[closest_idx]
         elif method == "GMM":
             raise NotImplementedError("GMM initialization not implemented yet")
         else:
             raise ValueError("Invalid method")
 
-        # Compute covariance from tangent vectors at mu
-        if log_map_vmap is None:
-            log_map_vmap = jax.vmap(jax_log_map_shooting, in_axes=(None, 0, None))
-        tangent_vectors = log_map_vmap(mu, X, self._metric)
+        tangent_vectors = self._compute_log_maps(mu, X, manifold)
         sigma = jnp.cov(tangent_vectors.T)
 
         A = self.compute_A(sigma)
         return mu, A, sigma
 
     def _loss(
-        self,
-        sigma: jnp.ndarray,
-        log_maps: jnp.ndarray,
-        normalization_constant: jnp.ndarray,
+        self, sigma: jnp.ndarray, log_maps: jnp.ndarray, norm_const: jnp.ndarray
     ) -> jnp.ndarray:
         """
         Compute the negative log-likelihood (empirical risk) of the LAND model given the data.
@@ -209,20 +201,19 @@ class LANDMLE:
             jnp.ndarray: The objective function value
         """
         inv_sigma = jnp.linalg.inv(sigma)
-        # Compute Mahalanobis-like squared distances in the tangent space
         distances = jnp.sum((log_maps @ inv_sigma) * log_maps, axis=-1)
-
         objective = jnp.sum(distances) / (2 * log_maps.shape[0])
-        objective += jnp.log(normalization_constant)
+        objective += jnp.log(norm_const)
         return objective
 
     def _compute_grad_mu(
         self,
         mu: jnp.ndarray,
         sigma: jnp.ndarray,
-        normalization_constant: jnp.ndarray,
+        norm_const: jnp.ndarray,
         key: jax.Array,
         log_maps: jnp.ndarray,
+        manifold: RiemannianManifold,
     ) -> jnp.ndarray:
         """
         Compute the gradient of the log-likelihood with respect to the spatial mean (mu).
@@ -249,37 +240,27 @@ class LANDMLE:
             key, mean=jnp.zeros(d), cov=sigma, shape=(self.S,)
         )
         mc_scale = jnp.sqrt((2 * jnp.pi) ** d * jnp.linalg.det(sigma)) / (
-            self.S * normalization_constant
+            self.S * norm_const
         )
 
         def exp_loss(v):
-            return self._m(mu, v) * v
+            translated_point = manifold.exp_map(mu, v)
+            M_trans = manifold.metric(translated_point)
+            m_val = jnp.sqrt(jnp.linalg.det(M_trans))
+            return m_val * v
 
         grad_mu_exp_map = -mc_scale * jnp.sum(jax.vmap(exp_loss)(v_samples), axis=0)
-
         return grad_mu_log_map + grad_mu_exp_map
-
-    def _m(self, mu: jnp.ndarray, v: jnp.ndarray) -> jnp.ndarray:
-        """
-        Compute the deformation of the metric at mu in the direction of v.
-        Params:
-            mu (jnp.ndarray): The mean of the distribution
-            v (jnp.ndarray): The tangent vector v at the point mu
-        Returns:
-            jnp.ndarray: The square root of the metric determinant at exp_mu(v)
-        """
-        translated_point = jax_exp_map(mu, v, self._metric)
-        metric_translated_point = self._metric(translated_point)
-        return jnp.sqrt(jnp.linalg.det(metric_translated_point))
 
     def _compute_grad_sigma(
         self,
         mu: jnp.ndarray,
         A: jnp.ndarray,
         sigma: jnp.ndarray,
-        normalization_constant: jnp.ndarray,
+        norm_const: jnp.ndarray,
         key: jax.Array,
         log_maps: jnp.ndarray,
+        manifold: RiemannianManifold,
     ) -> jnp.ndarray:
         """
         Compute the gradient of the log-likelihood with respect to the precision factor A.
@@ -292,9 +273,10 @@ class LANDMLE:
             mu (jnp.ndarray): The mean of the distribution
             A (jnp.ndarray): The A matrix of the distribution
             sigma (jnp.ndarray): The covariance of the distribution
-            normalization_constant (jnp.ndarray): The normalization constant of the distribution
+            norm_const (jnp.ndarray): The normalization constant of the distribution
             key (jax.Array): Random key for operations
             log_maps (jnp.ndarray): Pre-computed log maps of all data points at mu, shape (N, D)
+            manifold (RiemannianManifold): The Riemannian manifold
         Returns:
             jnp.ndarray: The gradient of the log-likelihood with respect to A matrix
         """
@@ -307,15 +289,16 @@ class LANDMLE:
             key, mean=jnp.zeros(d), cov=sigma, shape=(self.S,)
         )
         mc_scale = jnp.sqrt((2 * jnp.pi) ** d * jnp.linalg.det(sigma)) / (
-            self.S * normalization_constant
+            self.S * norm_const
         )
 
         def exp_outer(v):
-            return self._m(mu, v) * jnp.outer(v, v)
+            translated_point = manifold.exp_map(mu, v)
+            M_trans = manifold.metric(translated_point)
+            m_val = jnp.sqrt(jnp.linalg.det(M_trans))
+            return m_val * jnp.outer(v, v)
 
         grad_sigma_exp_map = -mc_scale * jnp.sum(jax.vmap(exp_outer)(v_samples), axis=0)
-
-        # Chain rule: gradient w.r.t. A from gradient w.r.t. sigma
         return A @ (grad_sigma_log_map + grad_sigma_exp_map)
 
     def compute_A(self, sigma: jnp.ndarray) -> jnp.ndarray:

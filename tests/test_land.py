@@ -4,6 +4,7 @@ import jax.numpy as jnp
 from unittest.mock import patch, MagicMock
 
 from src.models.land import LANDMLE
+from src.utils.land_utils import RiemannianManifold
 
 @pytest.fixture
 def land_model():
@@ -14,6 +15,16 @@ def dummy_data():
     key = jax.random.PRNGKey(42)
     return jax.random.normal(key, (5, 2))
 
+@pytest.fixture
+def mock_manifold():
+    manifold = MagicMock()  # Can't use spec easily due to abstract python logic
+    manifold.exp_map.return_value = jnp.zeros(2)
+    manifold.metric.return_value = jnp.eye(2)
+    manifold.log_map_batch.return_value = jnp.ones((5, 2))
+    manifold.compute_normalization_constant.return_value = jnp.array(1.0)
+    return manifold
+
+
 def test_init(land_model):
     """Test correctly initialized parameters."""
     assert land_model.lr_mu == 0.1
@@ -21,27 +32,31 @@ def test_init(land_model):
     assert land_model.S == 10
     assert land_model.epsilon == 1e-4
 
-@patch("src.models.land.jax_log_map_shooting")
-def test_init_params_random(mock_log_map, land_model, dummy_data):
+@patch("src.models.land.LANDMLE._compute_log_maps")
+def test_init_params_random(
+    mock_compute_log_maps, land_model, dummy_data, mock_manifold
+):
     """Test random initialization."""
-    mock_log_map.side_effect = [
-        jnp.array([1.0, 1.0]) for _ in range(dummy_data.shape[0])
-    ]
+    mock_compute_log_maps.return_value = jnp.ones((dummy_data.shape[0], 2))
     key = jax.random.PRNGKey(42)
-    mu, A, sigma = land_model._init_params(dummy_data, key=key, method="random")
+    mu, A, sigma = land_model._init_params(
+        dummy_data, key=key, method="random", manifold=mock_manifold
+    )
     assert mu.shape == (2,)
     assert sigma.shape == (2, 2)
     assert A.shape == (2, 2)
 
-@patch("src.models.land.jax_log_map_shooting")
-def test_init_params_mean(mock_log_map, land_model, dummy_data):
+@patch("src.models.land.LANDMLE._compute_log_maps")
+def test_init_params_mean(mock_compute_log_maps, land_model, dummy_data, mock_manifold):
     """Test mean initialization."""
-    mock_log_map.side_effect = [
-        jnp.array([1.0, 1.0]) for _ in range(dummy_data.shape[0])
-    ]
+    mock_compute_log_maps.return_value = jnp.ones((dummy_data.shape[0], 2))
     key = jax.random.PRNGKey(42)
-    mu, A, sigma = land_model._init_params(dummy_data, key=key, method="mean")
-    expected_mu = jnp.mean(dummy_data, axis=0)
+    mu, A, sigma = land_model._init_params(
+        dummy_data, key=key, method="mean", manifold=mock_manifold
+    )
+    expected_mu = dummy_data[
+        jnp.argmin(jnp.sum((dummy_data - jnp.mean(dummy_data, axis=0)) ** 2, axis=1))
+    ]
     assert jnp.allclose(mu, expected_mu)
     assert sigma.shape == (2, 2)
     assert A.shape == (2, 2)
@@ -53,8 +68,7 @@ def test_compute_A(land_model):
     expected_A = jnp.linalg.cholesky(jnp.linalg.inv(sigma)).T
     assert jnp.allclose(A, expected_A)
 
-@patch("src.models.land.jax_log_map_shooting")
-def test_loss(mock_log_map, land_model, dummy_data):
+def test_loss(land_model, dummy_data):
     """Test loss computation."""
     # Precomputed log_maps: shape (N, d), each row is [1.0, 1.0]
     log_maps = jnp.ones((dummy_data.shape[0], 2))
@@ -68,54 +82,22 @@ def test_loss(mock_log_map, land_model, dummy_data):
     expected_obj = 1.0 + jnp.log(jnp.array(2.0))
     assert jnp.allclose(loss_val, expected_obj)
 
-@patch("src.models.land.jax_metric")
-@patch("src.models.land.jax_exp_map")
-def test_m(mock_exp_map, mock_metric, land_model, dummy_data):
-    """Test the metric deformation calculation _m."""
-    mock_exp_map.return_value = jnp.zeros(2)
-    mock_metric.return_value = jnp.eye(2) * 4.0
-    land_model._metric = mock_metric
-
-    mu = jnp.zeros(2)
-    v = jnp.ones(2)
-
-    val = land_model._m(mu, v)
-    assert jnp.allclose(val, jnp.array(4.0))
-
-@patch("src.models.land.jax_metric")
-@patch("src.models.land.jax_exp_map")
-@patch("src.models.land.jax_log_map_shooting")
-def test_compute_grad_mu(
-    mock_log_map, mock_exp_map, mock_metric, land_model, dummy_data
-):
+def test_compute_grad_mu(land_model, dummy_data, mock_manifold):
     """Test gradient computation with respect to mu."""
-    mock_log_map.return_value = jnp.array([1.0, 0.0])
-    mock_exp_map.return_value = jnp.zeros(2)
-    mock_metric.return_value = jnp.eye(2)
-    land_model._metric = mock_metric
     key = jax.random.PRNGKey(42)
-
     mu = jnp.zeros(2)
     sigma = jnp.eye(2)
     normalization_constant = jnp.array(1.0)
     log_maps = jnp.ones((dummy_data.shape[0], 2))
 
-    grad = land_model._compute_grad_mu(mu, sigma, normalization_constant, key, log_maps)
+    grad = land_model._compute_grad_mu(
+        mu, sigma, normalization_constant, key, log_maps, mock_manifold
+    )
     assert grad.shape == mu.shape
 
-@patch("src.models.land.jax_metric")
-@patch("src.models.land.jax_exp_map")
-@patch("src.models.land.jax_log_map_shooting")
-def test_compute_grad_sigma(
-    mock_log_map, mock_exp_map, mock_metric, land_model, dummy_data
-):
+def test_compute_grad_sigma(land_model, dummy_data, mock_manifold):
     """Test gradient computation with respect to sigma."""
-    mock_log_map.return_value = jnp.array([1.0, 0.0])
-    mock_exp_map.return_value = jnp.zeros(2)
-    mock_metric.return_value = jnp.eye(2)
-    land_model._metric = mock_metric
     key = jax.random.PRNGKey(42)
-
     mu = jnp.zeros(2)
     A = jnp.eye(2)
     sigma = jnp.eye(2)
@@ -124,27 +106,25 @@ def test_compute_grad_sigma(
 
     try:
         grad = land_model._compute_grad_sigma(
-            mu, A, sigma, normalization_constant, key, log_maps
+            mu, A, sigma, normalization_constant, key, log_maps, mock_manifold
         )
         assert grad.shape == sigma.shape
     except Exception as e:
         pytest.fail(f"grad_sigma raised an unexpected exception: {e}")
 
-@patch("src.models.land.compute_normalization_constant")
-@patch("src.models.land.jax_metric")
-@patch("src.models.land.jax_exp_map")
-@patch("src.models.land.jax_log_map_shooting")
+@patch("src.models.land.RiemannianManifold")
+@patch("src.models.land.LANDMLE._compute_log_maps")
 def test_fit_learning_rates_and_convergence(
-    mock_log_map, mock_exp_map, mock_metric, mock_compute_norm, land_model, dummy_data
+    mock_compute_log_maps, mock_manifold_class, land_model, dummy_data, mock_manifold
 ):
     """Test the fit wrapper runs correctly, adapts learning rates and stops when loss diff < epsilon."""
     # Setup mocks
-    mock_log_map.side_effect = lambda mu, x, m: jax.random.normal(
-        jax.random.PRNGKey(0), (2,)
+    mock_manifold_class.return_value = mock_manifold
+
+    # We must patch the random output correctly for dummy log_maps across the iteration calls
+    mock_compute_log_maps.side_effect = lambda *args, **kwargs: jax.random.normal(
+        jax.random.PRNGKey(0), (dummy_data.shape[0], 2)
     )
-    mock_exp_map.return_value = jnp.zeros(2)
-    mock_metric.return_value = jnp.eye(2)
-    mock_compute_norm.return_value = jnp.array(1.0)
 
     land_model._loss = MagicMock(
         side_effect=[

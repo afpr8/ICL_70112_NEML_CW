@@ -1,16 +1,10 @@
 import jax
 import jax.numpy as jnp
-from functools import partial
 from sklearn.mixture import GaussianMixture
 from tqdm import tqdm
 import numpy as np
 
-from src.utils.land_utils import (
-    jax_exp_map,
-    jax_log_map_shooting,
-    compute_normalization_constant,
-    jax_metric,
-)
+from src.utils.land_utils import RiemannianManifold, compute_knn_initial_path
 
 
 class LANDMixtureModel:
@@ -23,6 +17,7 @@ class LANDMixtureModel:
         epsilon: float = 1e-3,
         sigma: float = 1.0,
         rho: float = 1e-3,
+        K_segments: int = 5,
         init_method: str = "mean",
         seed: int = 42,
     ):
@@ -36,6 +31,7 @@ class LANDMixtureModel:
             epsilon (float): The tolerance for the end condition
             sigma (float): Hyperparameter to compute the metric
             rho (float): Hyperparameter to compute the metric
+            K_segments (int): The number of segments to use for the Riemannian manifold
             init_method (str): Method to initialize params ("random", "mean", "GMM")
             seed (int): The PRNG seed used for jax RNG initialization.
         """
@@ -46,7 +42,7 @@ class LANDMixtureModel:
         self.epsilon = epsilon
         self.sigma = sigma
         self.rho = rho
-        self._metric = None
+        self.K_segments = K_segments
 
         self.init_method = init_method
         self.key = jax.random.key(seed)
@@ -64,21 +60,21 @@ class LANDMixtureModel:
             C (list[jnp.ndarray]): The normalisation constants
             pi (jnp.ndarray): The mixing weights
         """
-        self._metric = partial(jax_metric, X=X, sigma=self.sigma, rho=self.rho)
+        manifold = RiemannianManifold(X, self.sigma, self.rho, self.K_segments)
         N = X.shape[0]
-        log_map_vmap = jax.vmap(jax_log_map_shooting, in_axes=(None, 0, None))
 
-        # Initialise the parameters
         self.key, subkey = jax.random.split(self.key)
-        mu, A, sigma = self._init_params(X, key=subkey, method=self.init_method)
+        mu, A, sigma = self._init_params(
+            X, key=subkey, method=self.init_method, manifold=manifold
+        )
         pi = jnp.ones(self.K) / self.K
 
         C = []
         for k in range(self.K):
             self.key, subkey = jax.random.split(self.key)
             C.append(
-                compute_normalization_constant(
-                    mu[k], sigma[k], self._metric, subkey, n_samples=self.S
+                manifold.compute_normalization_constant(
+                    mu[k], sigma[k], subkey, n_samples=self.S
                 )
             )
 
@@ -98,7 +94,7 @@ class LANDMixtureModel:
                     inv_sigma = jnp.linalg.inv(sigma[k])
                     inv_sigmas.append(inv_sigma)
 
-                    log_maps = log_map_vmap(mu[k], X, self._metric)
+                    log_maps = self._compute_log_maps(mu[k], X, manifold)
                     log_maps_all.append(log_maps)
 
                     dist_sq = jnp.sum((log_maps @ inv_sigma) * log_maps, axis=-1)
@@ -139,15 +135,16 @@ class LANDMixtureModel:
                         N_k,
                         subkey,
                         log_maps_all[k],
+                        manifold,
                     )
 
                     # update mu
-                    mu[k] = jax_exp_map(mu[k], self.lr_mu * grad_mu, self._metric)
+                    mu[k] = manifold.exp_map(mu[k], self.lr_mu * grad_mu)
 
                     # estimate C_k using eq. 16
                     self.key, subkey = jax.random.split(self.key)
-                    C[k] = compute_normalization_constant(
-                        mu[k], sigma[k], self._metric, subkey, n_samples=self.S
+                    C[k] = manifold.compute_normalization_constant(
+                        mu[k], sigma[k], subkey, n_samples=self.S
                     )
 
                     # update A
@@ -161,11 +158,21 @@ class LANDMixtureModel:
 
                 t += 1
 
-        self._metric = None  # avoid memory leak
         return mu, sigma, C, pi
 
+    def _compute_log_maps(
+        self, mu: jnp.ndarray, X: jnp.ndarray, manifold: RiemannianManifold
+    ) -> jnp.ndarray:
+        m_np = np.array(mu)
+        X_np = np.array(X)
+        paths = [
+            compute_knn_initial_path(m_np, X_np[i], X_np, N_points=self.K_segments + 1)
+            for i in range(X_np.shape[0])
+        ]
+        return manifold.log_map_batch(mu, X, jnp.array(paths))
+
     def _init_params(
-        self, X: jnp.ndarray, key: jax.Array, method: str = "mean"
+        self, X: jnp.ndarray, key: jax.Array, method: str, manifold: RiemannianManifold
     ) -> tuple[list, list, list]:
         """
         Initialise the parameters of the mixture model.
@@ -198,15 +205,19 @@ class LANDMixtureModel:
             mu = [jnp.array(m, dtype=jnp.float32) for m in gmm.means_]
 
         elif method == "mean":
-            # Calculate the global empirical mean
-            global_mean = jnp.mean(X, axis=0)
+            # Calculate the Euclidean empirical mean
+            euclidean_mean = jnp.mean(X, axis=0)
 
-            # Add small random noise to break symmetry.
+            # Find the data point closest to the euclidean mean to ensure we start on the manifold
+            closest_idx = jnp.argmin(jnp.sum((X - euclidean_mean) ** 2, axis=1))
+            manifold_mean = X[closest_idx]
+
+            # Add small random noise to break symmetry, starting from the guaranteed manifold point.
             mu = []
             for _ in range(self.K):
                 key, subkey = jax.random.split(key)
                 mu.append(
-                    global_mean + 0.1 * jax.random.normal(subkey, global_mean.shape)
+                    manifold_mean + 0.1 * jax.random.normal(subkey, manifold_mean.shape)
                 )
 
         else:
@@ -214,11 +225,10 @@ class LANDMixtureModel:
 
         A = []
         sigma = []
-        log_map_vmap = jax.vmap(jax_log_map_shooting, in_axes=(None, 0, None))
 
         for k in range(self.K):
-            # Calculate initial covariance from tangent vectors mapped from the new mean
-            tangent_vectors = log_map_vmap(mu[k], X, self._metric)
+            #
+            tangent_vectors = self._compute_log_maps(mu[k], X, manifold)
             sig = jnp.cov(tangent_vectors.T)
 
             # Add a tiny ridge to the diagonal to ensure positive definiteness
@@ -239,6 +249,7 @@ class LANDMixtureModel:
         N_k: jnp.ndarray,
         key: jax.Array,
         log_maps: jnp.ndarray,
+        manifold: RiemannianManifold,
     ) -> tuple[jnp.ndarray, jnp.ndarray]:
         """
         Compute both the mu and sigma (A) gradients for a single component,
@@ -269,7 +280,13 @@ class LANDMixtureModel:
         mc_scale = jnp.sqrt((2 * jnp.pi) ** d * jnp.linalg.det(sigma)) / (
             self.S * normalization_constant
         )
-        m_values = jax.vmap(lambda v: self._m(mu, v))(v_samples)
+
+        def compute_m(v):
+            translated_point = manifold.exp_map(mu, v)
+            M_trans = manifold.metric(translated_point)
+            return jnp.sqrt(jnp.linalg.det(M_trans))
+
+        m_values = jax.vmap(compute_m)(v_samples)
 
         # Compute gradients
         grad_mu_mc = -mc_scale * jnp.sum(m_values[:, None] * v_samples, axis=0)
@@ -285,14 +302,6 @@ class LANDMixtureModel:
         grad_A = A @ (grad_sigma_data + grad_sigma_mc)
 
         return grad_mu, grad_A
-
-    def _m(self, mu: jnp.ndarray, v: jnp.ndarray) -> jnp.ndarray:
-        """
-        Compute the deformation of the metric at mu in the direction of v.
-        """
-        translated_point = jax_exp_map(mu, v, self._metric)
-        metric_translated_point = self._metric(translated_point)
-        return jnp.sqrt(jnp.linalg.det(metric_translated_point))
 
     def compute_A(self, sigma: jnp.ndarray) -> jnp.ndarray:
         """
