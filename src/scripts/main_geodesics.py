@@ -6,7 +6,10 @@ import os
 import time
 
 from src.data.synthetic import sample_non_linear_data
-from src.utils.land_utils import RiemannianManifold, compute_knn_initial_path
+from src.utils.land_utils import (
+    RiemannianManifold,
+    compute_knn_initial_paths,
+)
 
 
 def main():
@@ -16,6 +19,9 @@ def main():
     parser.add_argument("--sigma", type=float, default=0.15, help="Sigma parameter")
     parser.add_argument("--rho", type=float, default=1e-3, help="Rho parameter")
     parser.add_argument("--K_segments", type=int, default=10, help="Number of segments")
+    parser.add_argument(
+        "--n-neighbors", type=int, default=5, help="Number of neighbors for KNN graph"
+    )
     args = parser.parse_args()
 
     # 1. Generate Synthetic Data
@@ -30,7 +36,7 @@ def main():
     # 2. Define hyperparams and create manifold
     sigma, rho = args.sigma, args.rho
     K_segments = args.K_segments
-    manifold = RiemannianManifold(X_tensor, sigma, rho, K_segments)
+    manifold = RiemannianManifold(X_tensor, sigma, rho, K_segments, args.n_neighbors)
 
     # 3. Select 1 random base point and n target points
     num_targets = args.num_targets
@@ -50,14 +56,14 @@ def main():
 
     # 4. Compute initial paths using KNN graph
     t0 = time.time()
-    paths = []
-    for i in range(num_targets):
-        path = compute_knn_initial_path(
-            x_base, X_targets_np[i], X_np, N_points=K_segments + 1
-        )
-        paths.append(path)
-
-    paths_np = np.stack(paths)
+    # 4. Compute initial paths using KNN graph with Riemannian weights
+    t0 = time.time()
+    # We compute paths for all points in X_np at once for efficiency, then filter for targets
+    # This ensures that X_np is used as the node pool for the shortest path search.
+    all_paths = compute_knn_initial_paths(
+        x_base, X_np, manifold, N_points=K_segments + 1, n_neighbors=args.n_neighbors
+    )
+    paths_np = all_paths[target_indices]
     paths_jnp = jnp.array(paths_np, dtype=jnp.float32)
 
     x_base_jnp = jnp.array(x_base, dtype=jnp.float32)
@@ -150,7 +156,7 @@ def main():
 
     plots_dir = "plots"
     os.makedirs(plots_dir, exist_ok=True)
-    n_plots = os.listdir(plots_dir).__len__()
+    n_plots = len(os.listdir(plots_dir))
     out_file = f"{plots_dir}/geodesics_batch_result_{n_plots}.png"
     plt.savefig(out_file, dpi=150)
     print(f"Saved to {out_file}")

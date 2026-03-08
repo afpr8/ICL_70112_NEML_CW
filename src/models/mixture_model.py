@@ -4,7 +4,7 @@ from sklearn.mixture import GaussianMixture
 from tqdm import tqdm
 import numpy as np
 
-from src.utils.land_utils import RiemannianManifold, compute_knn_initial_path
+from src.utils.land_utils import RiemannianManifold, compute_knn_initial_paths
 
 
 class LANDMixtureModel:
@@ -18,6 +18,7 @@ class LANDMixtureModel:
         sigma: float = 1.0,
         rho: float = 1e-3,
         K_segments: int = 5,
+        n_neighbors: int = 5,
         init_method: str = "mean",
         seed: int = 42,
     ):
@@ -43,6 +44,7 @@ class LANDMixtureModel:
         self.sigma = sigma
         self.rho = rho
         self.K_segments = K_segments
+        self.n_neighbors = n_neighbors
 
         self.init_method = init_method
         self.key = jax.random.key(seed)
@@ -60,7 +62,9 @@ class LANDMixtureModel:
             C (list[jnp.ndarray]): The normalisation constants
             pi (jnp.ndarray): The mixing weights
         """
-        manifold = RiemannianManifold(X, self.sigma, self.rho, self.K_segments)
+        manifold = RiemannianManifold(
+            X, self.sigma, self.rho, self.K_segments, self.n_neighbors
+        )
         N = X.shape[0]
 
         self.key, subkey = jax.random.split(self.key)
@@ -165,10 +169,9 @@ class LANDMixtureModel:
     ) -> jnp.ndarray:
         m_np = np.array(mu)
         X_np = np.array(X)
-        paths = [
-            compute_knn_initial_path(m_np, X_np[i], X_np, N_points=self.K_segments + 1)
-            for i in range(X_np.shape[0])
-        ]
+        paths = compute_knn_initial_paths(
+            m_np, X_np, manifold, N_points=self.K_segments + 1
+        )
         return manifold.log_map_batch(mu, X, jnp.array(paths))
 
     def _init_params(

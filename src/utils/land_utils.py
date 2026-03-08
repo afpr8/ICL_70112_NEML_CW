@@ -3,61 +3,117 @@ import jax.numpy as jnp
 import jax.tree_util as jtu
 import diffrax
 import optimistix as optx
-from sklearn.neighbors import kneighbors_graph
+from sklearn.neighbors import NearestNeighbors
 from scipy.sparse.csgraph import shortest_path
+from scipy.sparse import csr_matrix, vstack, hstack
 from scipy.interpolate import interp1d
 import numpy as np
+from typing import Tuple, Any, Dict, Union
 
 
 def compute_knn_initial_path(
-    x: np.ndarray,
-    y: np.ndarray,
-    X: np.ndarray,
+    x: Union[np.ndarray, jax.Array],
+    y: Union[np.ndarray, jax.Array],
+    X: Union[np.ndarray, jax.Array],
+    manifold: "RiemannianManifold",
     N_points: int = 20,
     n_neighbors: int = 5,
 ) -> np.ndarray:
-    """
-    Computes a shortest path through the data manifold using a k-NN graph.
-    Runs on standard NumPy/SciPy (not JIT compiled).
-    """
-    nodes = np.vstack([x, y, X])
-    graph = kneighbors_graph(nodes, n_neighbors=n_neighbors, mode="distance")
-    dist_matrix, predecessors = shortest_path(
-        csgraph=graph, directed=False, indices=0, return_predecessors=True
+    # Shortest path through data manifold using k-NN graph
+    paths = compute_knn_initial_paths(
+        x, np.vstack([y[None, :], X]), manifold, N_points, n_neighbors
+    )
+    return paths[0]
+
+
+def compute_knn_initial_paths(
+    x: Union[np.ndarray, jax.Array],
+    X: Union[np.ndarray, jax.Array],
+    manifold: "RiemannianManifold",
+    N_points: int = 20,
+    n_neighbors: int = 5,
+) -> np.ndarray:
+    # Shortest paths from x to all points in X using manifold graph
+    X_data_np = np.array(manifold.X_data)
+    dists, indices = manifold.nn_tree.kneighbors(x[None, :])
+    dists, indices = dists[0], indices[0]
+
+    # Weighted edges from x to its manifold neighbors
+    M_diag_x = np.array(manifold.metric_diag(jnp.array(x)))
+    M_diags_neigh = np.array(jax.vmap(manifold.metric_diag)(manifold.X_data[indices]))
+    diffs = X_data_np[indices] - x[None, :]
+    w_x = np.sqrt(
+        np.clip(
+            0.5
+            * (
+                np.sum(M_diag_x * diffs**2, axis=1)
+                + np.sum(M_diags_neigh * diffs**2, axis=1)
+            ),
+            0,
+            None,
+        )
     )
 
-    path_indices = []
-    current_node = 1
-    while current_node != -9999 and current_node != 0:
-        path_indices.append(current_node)
-        current_node = predecessors[current_node]
-    path_indices.append(0)
-    path_indices.reverse()
+    # Construct combined graph with x (index 0)
+    x_to_data = csr_matrix(
+        (w_x, (np.zeros(n_neighbors, int), indices)), shape=(1, X_data_np.shape[0])
+    )
+    combined_graph = vstack(
+        [
+            hstack([csr_matrix((1, 1)), x_to_data]),
+            hstack([x_to_data.T, manifold.riemannian_graph]),
+        ]
+    ).tocsr()
 
-    raw_path = nodes[path_indices]
+    _, predecessors = shortest_path(
+        csgraph=combined_graph, directed=False, indices=0, return_predecessors=True
+    )
+    nodes, X_in = np.vstack([x, X_data_np]), np.array(X)
 
-    # Remove consecutive duplicate points to avoid division by zero in interpolation
-    diffs = np.diff(raw_path, axis=0)
-    distances = np.linalg.norm(diffs, axis=1)
-    keep = np.insert(distances > 1e-8, 0, True)
-    raw_path = raw_path[keep]
+    # Reconstruct paths for all targets in X
+    if X_in.shape == X_data_np.shape and np.allclose(X_in, X_data_np):
+        targets = np.arange(1, X_data_np.shape[0] + 1)
+    else:
+        targets = (
+            manifold.nn_tree.kneighbors(X_in, 1, return_distance=False).flatten() + 1
+        )
 
-    diffs = np.diff(raw_path, axis=0)
-    segment_lengths = np.linalg.norm(diffs, axis=1)
-    cumulative_length = np.insert(np.cumsum(segment_lengths), 0, 0.0)
+    all_paths = []
+    for idx, i in enumerate(targets):
+        path_idx = []
+        curr = i
+        while curr != -9999 and curr != 0:
+            path_idx.append(curr)
+            curr = predecessors[curr]
+        path_idx.append(0)
+        path_idx.reverse()
 
-    total_length = cumulative_length[-1]
-    if total_length == 0:
-        t = np.linspace(0, 1, N_points)[:, None]
-        return x + t * (y - x)
+        raw_path = nodes[path_idx]
+        if not np.allclose(raw_path[-1], X_in[idx], atol=1e-8):
+            raw_path = np.vstack([raw_path, X_in[idx]])
 
-    normalized_length = cumulative_length / total_length
+        if len(raw_path) > 1:
+            keep = np.insert(
+                np.linalg.norm(np.diff(raw_path, axis=0), axis=1) > 1e-8, 0, True
+            )
+            raw_path = raw_path[keep]
 
-    interpolator = interp1d(normalized_length, raw_path, axis=0, kind="linear")
-    t_uniform = np.linspace(0, 1, N_points)
-    uniform_path = interpolator(t_uniform)
+        if len(raw_path) < 2:
+            uniform_path = np.tile(raw_path[0], (N_points, 1))
+        else:
+            diff_p = np.diff(raw_path, axis=0)
+            cum_len = np.insert(np.cumsum(np.linalg.norm(diff_p, axis=1)), 0, 0.0)
+            if cum_len[-1] == 0:
+                uniform_path = raw_path[0] + np.linspace(0, 1, N_points)[:, None] * (
+                    raw_path[-1] - raw_path[0]
+                )
+            else:
+                uniform_path = interp1d(cum_len / cum_len[-1], raw_path, axis=0)(
+                    np.linspace(0, 1, N_points)
+                )
 
-    return uniform_path
+        all_paths.append(uniform_path)
+    return np.array(all_paths)
 
 
 @jtu.register_pytree_node_class
@@ -69,173 +125,197 @@ class RiemannianManifold:
 
     def __init__(
         self,
-        X_data: jnp.ndarray,
+        X_data: Union[np.ndarray, jax.Array],
         sigma: float = 1.0,
         rho: float = 1e-3,
         K_segments: int = 5,
-    ):
-        self.X_data = X_data
-        self.sigma = sigma
-        self.rho = rho
-        self.K_segments = K_segments
+        n_neighbors: int = 5,
+    ) -> None:
+        self.X_data, self.sigma, self.rho, self.K_segments, self.n_neighbors = (
+            X_data,
+            sigma,
+            rho,
+            K_segments,
+            n_neighbors,
+        )
+        X_np = np.array(X_data)
 
-    def tree_flatten(self):
+        # Cache NearestNeighbors tree and precompute Riemannian graph
+        self.nn_tree = NearestNeighbors(n_neighbors=n_neighbors)
+        self.nn_tree.fit(X_np)
+        self.adj_graph = self.nn_tree.kneighbors_graph(X_np, mode="connectivity")
+
+        M_diags = np.array(jax.vmap(self.metric_diag)(X_data))
+        coo = self.adj_graph.tocoo()
+        row, col = coo.row, coo.col
+        diffs = X_np[col] - X_np[row]
+        w = np.sqrt(
+            np.clip(
+                0.5
+                * (
+                    np.sum(M_diags[row] * diffs**2, axis=1)
+                    + np.sum(M_diags[col] * diffs**2, axis=1)
+                ),
+                0,
+                None,
+            )
+        )
+        self.riemannian_graph = csr_matrix((w, (row, col)), shape=self.adj_graph.shape)
+
+    def tree_flatten(self) -> Tuple[Tuple[jax.Array], Dict[str, Any]]:
         return (
             (self.X_data,),
-            {"sigma": self.sigma, "rho": self.rho, "K_segments": self.K_segments},
+            {
+                "sigma": self.sigma,
+                "rho": self.rho,
+                "K_segments": self.K_segments,
+                "n_neighbors": self.n_neighbors,
+            },
         )
 
     @classmethod
-    def tree_unflatten(cls, aux_data, children):
+    def tree_unflatten(
+        cls, aux_data: Dict[str, Any], children: Tuple[jax.Array]
+    ) -> "RiemannianManifold":
         return cls(*children, **aux_data)
 
-    def metric(self, x: jnp.ndarray) -> jnp.ndarray:
-        """Computes the local Riemannian metric tensor at point x."""
+    def metric_diag(self, x: jax.Array) -> jax.Array:
         diff = self.X_data - x[None, :]
-        dist2 = jnp.sum(diff**2, axis=-1)
-        weights = jnp.exp(-dist2 / (2.0 * self.sigma**2))
+        weights = jnp.exp(-jnp.sum(diff**2, axis=-1) / (2.0 * self.sigma**2))
+        return 1.0 / (jnp.sum(weights[:, None] * diff**2, axis=0) + self.rho)
 
-        weighted_sq = jnp.sum(weights[:, None] * (diff**2), axis=0)
-        diag_entries = weighted_sq + self.rho
-        M_x = jnp.diag(1.0 / diag_entries)
+    def metric(self, x: jax.Array) -> jax.Array:
+        return jnp.diag(self.metric_diag(x))
 
-        return M_x
+    def _local_speed(self, x: jax.Array, v: jax.Array) -> jax.Array:
+        return jnp.sqrt(jnp.sum(self.metric_diag(x) * v**2))
 
-    def _geodesic_ode(self, x: jnp.ndarray, v: jnp.ndarray) -> jnp.ndarray:
-        M_x = self.metric(x)
-        M_inv = jnp.linalg.inv(M_x)
-
-        def kinetic_energy(pos):
-            return 0.5 * jnp.dot(v, jnp.dot(self.metric(pos), v))
-
-        grad_L = jax.grad(kinetic_energy)(x)
-
-        def Mv_fn(pos):
-            return jnp.dot(self.metric(pos), v)
-
-        dot_M_v = jax.jacfwd(Mv_fn)(x) @ v
-
-        return M_inv @ (grad_L - dot_M_v)
-
-    def _vector_field(self, t, y, args):
-        d = y.shape[0] // 2
-        x_pt, v_pt = y[:d], y[d:]
-        a = self._geodesic_ode(x_pt, v_pt)
-        return jnp.concatenate([v_pt, a])
-
-    def exp_map(self, x: jnp.ndarray, v: jnp.ndarray) -> jnp.ndarray:
-        """Exponential map from x with initial velocity v."""
-        term = diffrax.ODETerm(self._vector_field)
-        solver = diffrax.Tsit5()
-        y0 = jnp.concatenate([x, v])
-
+    def curve_length(self, x: jax.Array, v: jax.Array, n_steps: int = 50) -> jax.Array:
+        # Quadrature-based Riemannian length of a geodesic
+        ts = jnp.linspace(0.0, 1.0, n_steps)
         sol = diffrax.diffeqsolve(
-            term,
-            solver,
+            diffrax.ODETerm(self._vector_field),
+            diffrax.Tsit5(),
             t0=0.0,
             t1=1.0,
             dt0=0.1,
-            y0=y0,
-            args=None,
+            y0=jnp.concatenate([x, v]),
+            saveat=diffrax.SaveAt(ts=ts),
+        )
+        return jnp.mean(
+            jax.vmap(self._local_speed)(
+                sol.ys[:, : x.shape[0]], sol.ys[:, x.shape[0] :]
+            )
+        )
+
+    def _geodesic_ode(self, x: jax.Array, v: jax.Array) -> jax.Array:
+        M_inv = jnp.linalg.inv(self.metric(x))
+        grad_L = jax.grad(lambda p: 0.5 * jnp.dot(v, jnp.dot(self.metric(p), v)))(x)
+        dot_M_v = jax.jacfwd(lambda p: jnp.dot(self.metric(p), v))(x) @ v
+        return M_inv @ (grad_L - dot_M_v)
+
+    def _vector_field(self, t: float, y: jax.Array, args: Any) -> jax.Array:
+        d = y.shape[0] // 2
+        return jnp.concatenate([y[d:], self._geodesic_ode(y[:d], y[d:])])
+
+    def exp_map(self, x: jax.Array, v: jax.Array) -> jax.Array:
+        sol = diffrax.diffeqsolve(
+            diffrax.ODETerm(self._vector_field),
+            diffrax.Tsit5(),
+            t0=0.0,
+            t1=1.0,
+            dt0=0.1,
+            y0=jnp.concatenate([x, v]),
             saveat=diffrax.SaveAt(t1=True),
-            stepsize_controller=diffrax.PIDController(rtol=1e-2, atol=1e-2),
+            stepsize_controller=diffrax.PIDController(1e-2, 1e-2),
             adjoint=diffrax.DirectAdjoint(),
         )
-        d = x.shape[0]
-        return sol.ys[0, :d]
+        return sol.ys[0, : x.shape[0]]
 
     def log_map_shooting(
-        self, x: jnp.ndarray, y: jnp.ndarray, initial_path: jnp.ndarray
-    ) -> jnp.ndarray:
-        """
-        Computes the log map using multiple shooting.
-        initial_path: (K_segments + 1, D) array of points.
-        """
-        D = x.shape[0]
-        K = self.K_segments
+        self,
+        x: jax.Array,
+        y: jax.Array,
+        initial_path: jax.Array,
+        scaled: bool = True,
+    ) -> jax.Array:
+        D, K = x.shape[0], self.K_segments
         dt = 1.0 / K
-
-        # Extract the interior states that we will optimize over.
-        v_guess = jnp.diff(initial_path, axis=0) / dt  # (K, D)
-        x_guess = initial_path[1:-1]  # (K-1, D)
-
-        y0 = jnp.concatenate([x_guess.flatten(), v_guess.flatten()])
+        y0 = jnp.concatenate(
+            [
+                (initial_path[1:-1]).flatten(),
+                (jnp.diff(initial_path, axis=0) / dt).flatten(),
+            ]
+        )
 
         def residual_fn(vars_flat, args):
-            x_opt = vars_flat[: (K - 1) * D].reshape((K - 1, D))
-            v_opt = vars_flat[(K - 1) * D :].reshape((K, D))
+            x_opt, v_opt = (
+                vars_flat[: (K - 1) * D].reshape((K - 1, D)),
+                vars_flat[(K - 1) * D :].reshape((K, D)),
+            )
+            x_k = jnp.vstack([x, x_opt])
 
-            # Reconstruct the full trajectory of initial points
-            x_k = jnp.vstack([x, x_opt])  # (K, D)
-
-            def integrate_segment(xk, vk):
-                term = diffrax.ODETerm(self._vector_field)
-                solver = diffrax.Tsit5()
-                state0 = jnp.concatenate([xk, vk])
-
-                sol = diffrax.diffeqsolve(
-                    term,
-                    solver,
+            def integrate(xk, vk):
+                return diffrax.diffeqsolve(
+                    diffrax.ODETerm(self._vector_field),
+                    diffrax.Tsit5(),
                     t0=0.0,
                     t1=dt,
                     dt0=dt / 2,
-                    y0=state0,
-                    args=None,
+                    y0=jnp.concatenate([xk, vk]),
                     saveat=diffrax.SaveAt(t1=True),
-                    stepsize_controller=diffrax.PIDController(rtol=1e-5, atol=1e-5),
+                    stepsize_controller=diffrax.PIDController(1e-5, 1e-5),
                     adjoint=diffrax.DirectAdjoint(),
-                )
-                return sol.ys[0]  # Return the full state (2*D)
+                ).ys[0]
 
-            # Predict end states of each segment
-            state_end_pred = jax.vmap(integrate_segment)(x_k, v_opt)  # (K, 2D)
-            x_end_pred = state_end_pred[:, :D]
-            v_end_pred = state_end_pred[:, D:]
+            pred = jax.vmap(integrate)(x_k, v_opt)
+            return jnp.concatenate(
+                [
+                    (pred[:, :D] - jnp.vstack([x_opt, y])).flatten(),
+                    (pred[:-1, D:] - v_opt[1:]).flatten(),
+                ]
+            )
 
-            x_target = jnp.vstack([x_opt, y])  # (K, D)
-
-            # For interior points, position and velocity must match. For the final point, only position matches y.
-            x_residuals = x_end_pred - x_target  # (K, D)
-            v_residuals = v_end_pred[:-1] - v_opt[1:]  # (K-1, D)
-
-            return jnp.concatenate([x_residuals.flatten(), v_residuals.flatten()])
-
-        solver = optx.LevenbergMarquardt(rtol=1e-5, atol=1e-5)
         sol = optx.root_find(
-            residual_fn, solver, y0=y0, args=None, max_steps=1000, throw=False
+            residual_fn,
+            optx.LevenbergMarquardt(1e-5, 1e-5),
+            y0=y0,
+            max_steps=1000,
+            throw=False,
         )
-
-        opt_vars = sol.value
-        v_opt = opt_vars[(K - 1) * D :].reshape((K, D))
-
-        return v_opt[0]
+        v0 = sol.value[(K - 1) * D :].reshape((K, D))[0]
+        if scaled:
+            # Scale v0 to have equal length in Euclidean space as in the manifold
+            return v0 * (self.curve_length(x, v0) / (jnp.linalg.norm(v0) + 1e-12))
+        return v0
 
     def log_map_batch(
-        self, mu: jnp.ndarray, X_targets: jnp.ndarray, initial_paths: jnp.ndarray
-    ) -> jnp.ndarray:
-        return jax.vmap(self.log_map_shooting, in_axes=(None, 0, 0))(
-            mu, X_targets, initial_paths
+        self,
+        mu: jax.Array,
+        X_targets: jax.Array,
+        initial_paths: jax.Array,
+        scaled: bool = True,
+    ) -> jax.Array:
+        return jax.vmap(self.log_map_shooting, in_axes=(None, 0, 0, None))(
+            mu, X_targets, initial_paths, scaled
         )
 
     def compute_normalization_constant(
         self,
-        mu: jnp.ndarray,
-        sigma: jnp.ndarray,
+        mu: jax.Array,
+        sigma: jax.Array,
         key: jax.Array,
         n_samples: int = 3000,
-    ) -> tuple[jnp.ndarray, jnp.ndarray]:
+    ) -> Tuple[jax.Array, jax.Array]:
         d = mu.shape[0]
-        Z = jnp.sqrt((2 * jnp.pi) ** d * jnp.linalg.det(sigma))
-
         v_samples = jax.random.multivariate_normal(
-            key, mean=jnp.zeros(d), cov=sigma, shape=(n_samples,)
+            key, jnp.zeros(d), sigma, (n_samples,)
         )
 
-        def compute_vol(v):
-            x = self.exp_map(mu, v)
-            M_x = self.metric(x)
-            log_det = jnp.sum(jnp.log(jnp.diag(M_x)))
-            return jnp.exp(0.5 * log_det)
+        def vol(v):
+            return jnp.exp(
+                0.5 * jnp.sum(jnp.log(jnp.diag(self.metric(self.exp_map(mu, v)))))
+            )
 
-        vols = jax.vmap(compute_vol)(v_samples)
-        return Z * jnp.mean(vols), v_samples
+        Z = jnp.sqrt((2 * jnp.pi) ** d * jnp.linalg.det(sigma))
+        return Z * jnp.mean(jax.vmap(vol)(v_samples)), v_samples

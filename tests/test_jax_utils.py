@@ -19,7 +19,7 @@ def jax_setup():
     x = jnp.array([1.0, 1.0])
     sigma = 1.0
     rho = 1e-3
-    manifold = RiemannianManifold(X, sigma, rho, K_segments=5)
+    manifold = RiemannianManifold(X, sigma, rho, K_segments=5, n_neighbors=1)
     return manifold, X, x, sigma, rho
 
 
