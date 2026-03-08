@@ -110,7 +110,7 @@ def jax_exp_map_rk4(
     x: jnp.ndarray, 
     v: jnp.ndarray, 
     metric_fn: Callable, 
-    steps: int = 10
+    steps: int = 100
 ) -> jnp.ndarray:
     """
     4th-order Runge-Kutta (RK4) implementation of the Exponential Map.
