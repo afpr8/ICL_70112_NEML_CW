@@ -161,7 +161,7 @@ class LANDMLE:
         t = 0
         
         with tqdm(desc="LAND MLE Fit", unit=" epoch", total=max_epochs) as pbar:
-            while t < 200 or (loss_diff**2 > self.epsilon and t < max_epochs):
+            while t < 20 or (loss_diff**2 > self.epsilon and t < max_epochs):
                 
                 # Execute the compiled JAX step
                 mu, A, sigma, norm_const, current_loss, loss_diff, self.lr_mu, self.lr_A, self.key = update_step(
@@ -278,30 +278,50 @@ class LANDMLE:
         A = self.compute_A(sigma)
         return mu, A, sigma
 
+    # def _loss(
+    #     self,
+    #     sigma: jnp.ndarray,
+    #     log_maps: jnp.ndarray,
+    #     normalization_constant: jnp.ndarray,
+    # ) -> jnp.ndarray:
+    #     """
+    #     Compute the negative log-likelihood (empirical risk) of the LAND model given the data.
+
+    #     This computes the objective function locally using the Mahalanobis-like distance
+    #     in the tangent space (via the log map), as well as the normalization constant.
+    #     Params:
+    #         sigma (jnp.ndarray): The covariance of the distribution
+    #         log_maps (jnp.ndarray): Pre-computed log maps of all data points at mu, shape (N, D)
+    #         normalization_constant (jnp.ndarray): The normalization constant of the distribution
+    #     Returns:
+    #         jnp.ndarray: The objective function value
+    #     """
+    #     inv_sigma = jnp.linalg.inv(sigma)
+    #     # Compute Mahalanobis-like squared distances in the tangent space
+    #     distances = jnp.sum((log_maps @ inv_sigma) * log_maps, axis=-1)
+
+    #     objective = jnp.sum(distances) / (2 * log_maps.shape[0])
+    #     objective += jnp.log(normalization_constant)
+    #     return objective
+
     def _loss(
         self,
         sigma: jnp.ndarray,
         log_maps: jnp.ndarray,
         normalization_constant: jnp.ndarray,
     ) -> jnp.ndarray:
-        """
-        Compute the negative log-likelihood (empirical risk) of the LAND model given the data.
-
-        This computes the objective function locally using the Mahalanobis-like distance
-        in the tangent space (via the log map), as well as the normalization constant.
-        Params:
-            sigma (jnp.ndarray): The covariance of the distribution
-            log_maps (jnp.ndarray): Pre-computed log maps of all data points at mu, shape (N, D)
-            normalization_constant (jnp.ndarray): The normalization constant of the distribution
-        Returns:
-            jnp.ndarray: The objective function value
-        """
-        inv_sigma = jnp.linalg.inv(sigma)
-        # Compute Mahalanobis-like squared distances in the tangent space
-        distances = jnp.sum((log_maps @ inv_sigma) * log_maps, axis=-1)
-
+        # 1. Use a robust linear solver instead of direct inversion.
+        # jax.scipy.linalg.solve with assume_a='pos' is highly optimised for covariance matrices.
+        inv_sigma_log_maps = jax.scipy.linalg.solve(sigma, log_maps.T, assume_a='pos').T
+        
+        # Compute Mahalanobis-like squared distances
+        distances = jnp.sum(log_maps * inv_sigma_log_maps, axis=-1)
         objective = jnp.sum(distances) / (2 * log_maps.shape[0])
-        objective += jnp.log(normalization_constant)
+        
+        # 2. Prevent NaN from log(0) or log(negative)
+        safe_norm_const = jnp.maximum(normalization_constant, 1e-12)
+        objective += jnp.log(safe_norm_const)
+        
         return objective
 
     def _compute_grad_mu(
