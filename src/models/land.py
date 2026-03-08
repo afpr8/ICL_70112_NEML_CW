@@ -161,7 +161,7 @@ class LANDMLE:
         t = 0
         
         with tqdm(desc="LAND MLE Fit", unit=" epoch", total=max_epochs) as pbar:
-            while t < 10 or (loss_diff**2 > self.epsilon and t < max_epochs):
+            while t < 20 or (loss_diff**2 > self.epsilon and t < max_epochs):
                 
                 # Execute the compiled JAX step
                 mu, A, sigma, norm_const, current_loss, loss_diff, self.lr_mu, self.lr_A, self.key = update_step(
