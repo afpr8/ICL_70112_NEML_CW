@@ -32,7 +32,7 @@ class LANDMLE:
         epsilon: float = 1e-3,
         sigma: float = 1.0,  # Set to 1.0 in the original paper and tested from 0.5 to 1.5
         rho: float = 1e-3,
-        init_method: str = "random",
+        init_method: str = "mean",
         seed: int = 42,
     ):
         """

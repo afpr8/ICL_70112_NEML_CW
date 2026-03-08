@@ -69,8 +69,8 @@ def jax_exp_map(
         return jnp.concatenate([v_pt, a])
 
     term = diffrax.ODETerm(jax_vector_field)
-    # solver = diffrax.Euler()
-    solver = diffrax.Dopri5()
+    solver = diffrax.Euler()
+    # solver = diffrax.Heun()
     y0 = jnp.concatenate([x, v])
 
     sol = diffrax.diffeqsolve(
