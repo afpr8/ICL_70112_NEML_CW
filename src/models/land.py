@@ -66,111 +66,123 @@ class LANDMLE:
         self.key = jax.random.key(seed)
         self._metric = None
 
-    def fit(self, X: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    def fit(self, X: jnp.ndarray, max_epochs: int = 200) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
-        Fit the LAND model to the data
+        Fit the LAND model to the data.
         Params:
             X (jnp.ndarray): The data to fit the model to, shape (N, D)
+            max_epochs (int): Safety limit to prevent infinite loops.
         Returns:
-            mu (jnp.ndarray): The mean of the distribution
-            sigma (jnp.ndarray): The covariance of the distribution
-            normalization_constant (jnp.ndarray): The normalization constant of the distribution
+            mu (np.ndarray): The mean of the distribution
+            sigma (np.ndarray): The covariance of the distribution
+            normalization_constant (np.ndarray): The normalization constant of the distribution
         """
         self._metric = partial(jax_metric, X=X, sigma=self.sigma, rho=self.rho)
-        self.loss_history = []
-        self.mu_history = []
-
-        # Cache the vmapped log_map_shooting for reuse every iteration
         log_map_vmap = jax.vmap(jax_log_map_shooting, in_axes=(None, 0, None))
 
+        # Initialise parameters
         self.key, subkey = jax.random.split(self.key)
         mu, A, sigma = self._init_params(X, subkey, self.init_method, log_map_vmap)
 
-        self.mu_history.append(np.array(mu))
+        # ---------------------------------------------------------------------
+        # Pre-compile the update step to avoid Python loop overhead.
+        # This pure function executes entirely on the accelerator.
+        # ---------------------------------------------------------------------
+        @jax.jit
+        def update_step(mu_curr, A_curr, sigma_curr, lr_mu_curr, lr_A_curr, key_curr):
+            # 1. Split keys for all stochastic operations in this step
+            key_curr, key_mu, key_sigma, key_norm1, key_norm2 = jax.random.split(key_curr, 5)
 
+            # Compute log maps and normalisation for the current state
+            log_maps_curr = log_map_vmap(mu_curr, X, self._metric)
+            norm_const_curr = compute_normalization_constant(
+                mu_curr, sigma_curr, self._metric, key_norm1, self.S
+            )
+            loss_curr = self._loss(sigma_curr, log_maps_curr, norm_const_curr)
+
+            # --- Update spatial mean (mu) ---
+            grad_mu = self._compute_grad_mu(mu_curr, sigma_curr, norm_const_curr, key_mu, log_maps_curr)
+            mu_new = jax_exp_map(mu_curr, lr_mu_curr * grad_mu, self._metric)
+            
+            # --- Evaluate intermediate state (New mu, Old sigma) ---
+            # Required to properly isolate and measure the effect of the A update
+            log_maps_new_mu = log_map_vmap(mu_new, X, self._metric)
+            norm_const_intermediate = compute_normalization_constant(
+                mu_new, sigma_curr, self._metric, key_norm2, self.S
+            )
+            loss_intermediate = self._loss(sigma_curr, log_maps_new_mu, norm_const_intermediate)
+
+            # --- Update precision factor (A) and covariance (sigma) ---
+            grad_sigma = self._compute_grad_sigma(
+                mu_new, A_curr, sigma_curr, norm_const_intermediate, key_sigma, log_maps_new_mu
+            )
+            A_new = A_curr - lr_A_curr * grad_sigma
+            
+            # Stabilised covariance calculation: solve (A^T A) * Sigma = I
+            precision_matrix = A_new.T @ A_new + 1e-8 * jnp.eye(A_new.shape[0])
+            sigma_new = jnp.linalg.solve(precision_matrix, jnp.eye(A_new.shape[0]))
+            
+            # --- Evaluate final state (New mu, New sigma) ---
+            key_curr, key_norm3 = jax.random.split(key_curr)
+            norm_const_new = compute_normalization_constant(
+                mu_new, sigma_new, self._metric, key_norm3, self.S
+            )
+            loss_new = self._loss(sigma_new, log_maps_new_mu, norm_const_new)
+
+            # --- Adjust Learning Rates ---
+            loss_diff_A = loss_new - loss_intermediate
+            
+            # Use jnp.where to handle control flow inside JIT compilation
+            lr_A_new = jnp.where(
+                loss_diff_A > 0, 
+                lr_A_curr * self.lr_scale_down, 
+                lr_A_curr * self.lr_scale_up
+            )
+            lr_mu_new = lr_mu_curr * 0.95
+            
+            loss_diff_total = loss_curr - loss_new
+
+            return mu_new, A_new, sigma_new, norm_const_new, loss_new, loss_diff_total, lr_mu_new, lr_A_new, key_curr
+
+        # ---------------------------------------------------------------------
+        # Training Loop
+        # ---------------------------------------------------------------------
+        mu_history_jax = [mu]
+        loss_history_jax = []
+        
+        # Calculate the absolute initial loss before starting
         self.key, subkey = jax.random.split(self.key)
-        normalization_constant = compute_normalization_constant(
-            mu, sigma, self._metric, subkey, self.S
-        )
-        loss_diff = float("inf")
-
+        initial_log_maps = log_map_vmap(mu, X, self._metric)
+        initial_norm_const = compute_normalization_constant(mu, sigma, self._metric, subkey, self.S)
+        current_loss = self._loss(sigma, initial_log_maps, initial_norm_const)
+        loss_history_jax.append(current_loss)
+        
+        loss_diff = jnp.array(float("inf"))
         t = 0
-        with tqdm(desc="LAND MLE Fit", unit=" epoch") as pbar:
-            while ((loss_diff**2 > self.epsilon) or t < 20) and t < 100: # TODO put args for max and min epochs
-                # Store previous values
-                prev_sigma = sigma
-                prev_normalization_constant = normalization_constant
-
-                # Compute log_maps once, reused by loss, grad_mu, and grad_sigma
-                log_maps = log_map_vmap(mu, X, self._metric)
-                prev_loss = self._loss(sigma, log_maps, normalization_constant)
+        
+        with tqdm(desc="LAND MLE Fit", unit=" epoch", total=max_epochs) as pbar:
+            while t < 10 or (loss_diff**2 > self.epsilon and t < max_epochs):
                 
-                # Capture the initial loss on the very first epoch
-                if t == 0:
-                    self.loss_history.append(float(prev_loss))
-
-                # Update mu
-                self.key, subkey = jax.random.split(self.key)
-                grad_mu = self._compute_grad_mu(
-                    mu, sigma, normalization_constant, subkey, log_maps
-                )
-                mu = jax_exp_map(
-                    mu, self.lr_mu * grad_mu, self._metric
-                )
-
-                # Store mu history for visualization
-                self.mu_history.append(np.array(mu))
-
-                # self.key, subkey = jax.random.split(self.key)
-                normalization_constant = compute_normalization_constant(
-                    mu, sigma, self._metric, subkey, self.S
-                )
-
-                # Scale lr_mu: shrink if loss increased, grow if it decreased
-                log_maps = log_map_vmap(mu, X, self._metric)
-                loss_diff = (
-                    self._loss(sigma, log_maps, normalization_constant) - prev_loss
+                # Execute the compiled JAX step
+                mu, A, sigma, norm_const, current_loss, loss_diff, self.lr_mu, self.lr_A, self.key = update_step(
+                    mu, A, sigma, self.lr_mu, self.lr_A, self.key
                 )
                 
-
-                # Update sigma
-                # self.key, subkey = jax.random.split(self.key)
-                grad_sigma = self._compute_grad_sigma(
-                    mu, A, sigma, normalization_constant, subkey, log_maps
-                )
-                A = A - self.lr_A * grad_sigma
-                sigma = jnp.linalg.inv(A.T @ A)
-
-                prev_normalization_constant = normalization_constant
-                # self.key, subkey = jax.random.split(self.key)
-                normalization_constant = compute_normalization_constant(
-                    mu, sigma, self._metric, subkey, self.S
-                )
-
-                # Calculate new loss and append to history
-                new_loss = self._loss(sigma, log_maps, normalization_constant)
-                self.loss_history.append(float(new_loss))
+                # Append raw JAX tracer arrays (does not trigger device-to-host transfer)
+                mu_history_jax.append(mu)
+                loss_history_jax.append(current_loss)
                 
-                # Scale lr_A: compare new sigma loss against previous sigma
-                loss_diff_A = new_loss - self._loss(
-                    prev_sigma, log_maps, prev_normalization_constant
-                )
-                if loss_diff_A > 0:
-                    self.lr_A *= self.lr_scale_down
-                else:
-                    self.lr_A *= self.lr_scale_up
-
-                loss_diff = new_loss - prev_loss
-
-                pbar.set_postfix(loss_diff=float(loss_diff), loss=float(new_loss))
+                # Convert only the strictly necessary scalars for the progress bar
+                pbar.set_postfix(loss_diff=float(loss_diff), loss=float(current_loss))
                 pbar.update(1)
-                
                 t += 1
-                self.lr_mu *= 0.95
-                # self.lr_A *= 0.95
+
+        # Synchronise arrays back to the host CPU entirely at the end
+        self.loss_history = [float(l) for l in loss_history_jax]
+        self.mu_history = [np.array(m) for m in mu_history_jax]
 
         self._metric = None
-        return mu, sigma, normalization_constant
+        return np.array(mu), np.array(sigma), np.array(norm_const)
 
     def plot_loss(self):
         """

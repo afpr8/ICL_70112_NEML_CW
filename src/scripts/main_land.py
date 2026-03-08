@@ -55,7 +55,7 @@ def plot_geodesics(ax, X, mean, geodesics):
 
 def main():
     # 1. Generate Non-Linear Data (One Moon usually better for a single component, but we'll use a single half-moon)
-    X_np, true_labels = make_moons(n_samples=400, noise=0.1, random_state=42)
+    X_np, true_labels = make_moons(n_samples=200, noise=0.1, random_state=42)
     # Just take one moon for a single LAND distribution
     X_np = X_np[true_labels == 0]
     # X_np = generate_data(data_type=1, N=200, sigma=0.1)  # Using the first data type (half-moon with a hole)
@@ -67,7 +67,7 @@ def main():
 
     # 2. Fit LAND MLE Model
     print("Fitting LAND MLE Model...")
-    land = LANDMLE(initial_lr_mu=0.3, initial_lr_A=0.3, S=50, epsilon=1e-1, sigma=sigma, rho=rho)
+    land = LANDMLE(initial_lr_mu=0.3, initial_lr_A=0.3, S=100, epsilon=1e-3, sigma=sigma, rho=rho)
     land_mu, land_sigma, land_C = land.fit(X_tensor)
     land.plot_loss()
     land.plot_trajectory(X_tensor)
