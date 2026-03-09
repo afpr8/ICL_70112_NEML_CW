@@ -31,32 +31,44 @@ def compute_knn_initial_paths(
     X: Union[np.ndarray, jax.Array],
     manifold: "RiemannianManifold",
     N_points: int = 20,
-    n_neighbors: int = 5,
 ) -> np.ndarray:
-    # Shortest paths from x to all points in X using manifold graph
+    """
+    Computes the shortest paths from x to all points in X using the manifold graph.
+
+    In order to do this, we
+    1) Compute the Riemannian distance from x to its k nearest neighbors in the
+    manifold (x_to_data).
+    2) Combine the precomputed distance graph for X (manifold.riemannian_graph) with
+    the x_to_data graph.
+    3) Use the combined graph to compute the shortest paths from x to all points in X.
+    4) Reconstruct the paths for all targets in X.
+    5) Remove points that are too close to each other, as this causes numerical
+    stability issues when computing the geodesics.
+    6) Interpolate the paths and sample N_points uniformly along them.
+
+    Args:
+        x: The base point from which to compute the paths.
+        X: The target points to which to compute the paths.
+        manifold: The Riemannian manifold on which to compute the paths.
+        N_points: The number of points to sample along each path.
+
+    Returns:
+        np.ndarray: The shortest paths from x to all points in X.
+    """
+    # Compute weighted edges from x to its manifold neighbors
     X_data_np = np.array(manifold.X_data)
     dists, indices = manifold.nn_tree.kneighbors(x[None, :])
     dists, indices = dists[0], indices[0]
 
-    # Weighted edges from x to its manifold neighbors
     M_diag_x = np.array(manifold.metric_diag(jnp.array(x)))
-    M_diags_neigh = np.array(jax.vmap(manifold.metric_diag)(manifold.X_data[indices]))
+    M_diags_neigh = manifold.M_diags[indices]
     diffs = X_data_np[indices] - x[None, :]
-    w_x = np.sqrt(
-        np.clip(
-            0.5
-            * (
-                np.sum(M_diag_x * diffs**2, axis=1)
-                + np.sum(M_diags_neigh * diffs**2, axis=1)
-            ),
-            0,
-            None,
-        )
-    )
+    w_x = manifold.compute_edge_weights(diffs, M_diag_x, M_diags_neigh)
 
-    # Construct combined graph with x (index 0)
+    # Construct combined graph with x
     x_to_data = csr_matrix(
-        (w_x, (np.zeros(n_neighbors, int), indices)), shape=(1, X_data_np.shape[0])
+        (w_x, (np.zeros(manifold.n_neighbors, int), indices)),
+        shape=(1, X_data_np.shape[0]),
     )
     combined_graph = vstack(
         [
@@ -65,19 +77,21 @@ def compute_knn_initial_paths(
         ]
     ).tocsr()
 
+    # Compute shortest paths from x to all points in X
     _, predecessors = shortest_path(
         csgraph=combined_graph, directed=False, indices=0, return_predecessors=True
     )
     nodes, X_in = np.vstack([x, X_data_np]), np.array(X)
 
-    # Reconstruct paths for all targets in X
     if X_in.shape == X_data_np.shape and np.allclose(X_in, X_data_np):
         targets = np.arange(1, X_data_np.shape[0] + 1)
     else:
+        # Find the closest point in the manifold for each point in X and use that as target
         targets = (
             manifold.nn_tree.kneighbors(X_in, 1, return_distance=False).flatten() + 1
         )
 
+    # Reconstruct paths for all targets in X
     all_paths = []
     for idx, i in enumerate(targets):
         path_idx = []
@@ -90,27 +104,29 @@ def compute_knn_initial_paths(
 
         raw_path = nodes[path_idx]
         if not np.allclose(raw_path[-1], X_in[idx], atol=1e-8):
+            # When the target point is not in the manifold, we append it to the path
             raw_path = np.vstack([raw_path, X_in[idx]])
 
         if len(raw_path) > 1:
+            # Remove points that are too close to each other
             keep = np.insert(
                 np.linalg.norm(np.diff(raw_path, axis=0), axis=1) > 1e-8, 0, True
             )
-            raw_path = raw_path[keep]
+            while not keep.all() and len(raw_path) > 1:
+                raw_path = raw_path[keep]
+                keep = np.insert(
+                    np.linalg.norm(np.diff(raw_path, axis=0), axis=1) > 1e-8, 0, True
+                )
 
-        if len(raw_path) < 2:
+        if len(raw_path) <= 1:
             uniform_path = np.tile(raw_path[0], (N_points, 1))
         else:
+            # Construct a linear interpolation of the path and sample N_points along it
             diff_p = np.diff(raw_path, axis=0)
             cum_len = np.insert(np.cumsum(np.linalg.norm(diff_p, axis=1)), 0, 0.0)
-            if cum_len[-1] == 0:
-                uniform_path = raw_path[0] + np.linspace(0, 1, N_points)[:, None] * (
-                    raw_path[-1] - raw_path[0]
-                )
-            else:
-                uniform_path = interp1d(cum_len / cum_len[-1], raw_path, axis=0)(
-                    np.linspace(0, 1, N_points)
-                )
+            uniform_path = interp1d(cum_len / cum_len[-1], raw_path, axis=0)(
+                np.linspace(0, 1, N_points)
+            )
 
         all_paths.append(uniform_path)
     return np.array(all_paths)
@@ -145,22 +161,34 @@ class RiemannianManifold:
         self.nn_tree.fit(X_np)
         self.adj_graph = self.nn_tree.kneighbors_graph(X_np, mode="connectivity")
 
-        M_diags = np.array(jax.vmap(self.metric_diag)(X_data))
+        self.M_diags = np.array(jax.vmap(self.metric_diag)(X_data))
         coo = self.adj_graph.tocoo()
         row, col = coo.row, coo.col
         diffs = X_np[col] - X_np[row]
-        w = np.sqrt(
+        w = self.compute_edge_weights(diffs, self.M_diags[row], self.M_diags[col])
+        self.riemannian_graph = csr_matrix((w, (row, col)), shape=self.adj_graph.shape)
+
+    def compute_edge_weights(
+        self, diffs: np.ndarray, M_i: np.ndarray, M_j: np.ndarray
+    ) -> np.ndarray:
+        """
+        Computes the Riemannian edge weights between two sets of points X_i and X_j.
+
+        Args:
+            diffs: The differences between X_i and X_j.
+            M_i: The metric diagonal of X_i.
+            M_j: The metric diagonal of X_j.
+
+        Returns:
+            np.ndarray: The approximated geodesic distances between the point pairs.
+        """
+        return np.sqrt(
             np.clip(
-                0.5
-                * (
-                    np.sum(M_diags[row] * diffs**2, axis=1)
-                    + np.sum(M_diags[col] * diffs**2, axis=1)
-                ),
+                0.5 * np.sum((M_i + M_j) * diffs**2, axis=1),
                 0,
                 None,
             )
         )
-        self.riemannian_graph = csr_matrix((w, (row, col)), shape=self.adj_graph.shape)
 
     def tree_flatten(self) -> Tuple[Tuple[jax.Array], Dict[str, Any]]:
         return (
