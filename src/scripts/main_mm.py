@@ -67,7 +67,7 @@ def evaluate_land_density(
 
     # Filter out empty space using the manifold's KNN tree
     distances = manifold.nn_tree.kneighbors(grid_points, 1, return_distance=True)[0]
-    threshold = 0.5 * manifold.sigma
+    threshold = 1 * manifold.sigma
     valid_mask = distances.flatten() < threshold
 
     valid_grid_points = grid_points[valid_mask]
