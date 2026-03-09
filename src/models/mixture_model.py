@@ -56,8 +56,8 @@ class LANDMixtureModel:
             seed (int): The PRNG seed used for jax RNG initialisation.
         """
         self.K = K
-        self.lr_mu = lr_mu
-        self.lr_A = lr_A
+        self.lr_mu = jnp.ones(self.K) * lr_mu
+        self.lr_A = jnp.ones(self.K) * lr_A
         self.S = S
         self.epsilon = epsilon
         self.patience = patience
@@ -139,32 +139,34 @@ class LANDMixtureModel:
                     n_wo_improvement = 0
                 global_loss_prev = global_loss_current
 
-                pbar.set_postfix(
-                    loss=float(global_loss_current),
-                    no_impr=int(n_wo_improvement),
-                )
-                pbar.update(1)
 
-                # PRE-COMPUTE CLUSTER BASELINE LOSSES
-                comp_losses = jnp.zeros(self.K)
+                # Pre-compute component-wise losses for potential reversion during the M-step
+                k_losses = jnp.zeros(self.K)
                 for k in range(self.K):
                     # Q-function loss: -sum( r_nk * log p(x | mu_k, Sigma_k) )
                     dist_sq = jnp.sum((log_maps_all[k] @ inv_sigmas[k]) * log_maps_all[k], axis=-1)
                     log_p_x = -jnp.log(C[k]) - 0.5 * dist_sq
-                    comp_losses = comp_losses.at[k].set(-jnp.sum(r[:, k] * log_p_x))
+                    k_losses = k_losses.at[k].set(-jnp.sum(r[:, k] * log_p_x))
+
+                pbar.set_postfix(
+                    loss=float(global_loss_current),
+                    k_losses=[float(loss) for loss in k_losses],
+                    no_impr=int(n_wo_improvement)
+                )
+                pbar.update(1)
 
                 # M-STEP (Component-wise Propose & Check)
                 for k in range(self.K):
                     N_k = r[:, k].sum()
 
-                    # === 1. UPDATE & CHECK MU ===
+                    # compute grad mu
                     self.key, subkey = jax.random.split(self.key)
                     grad_mu = self._compute_grad_mu(
                         mu[k], sigma[k], C[k], Vs[k], r[:, k], N_k, subkey, log_maps_all[k], manifold
                     )
 
                     # Propose new mu
-                    new_mu_k = manifold.exp_map(mu[k], self.lr_mu * grad_mu)
+                    new_mu_k = manifold.exp_map(mu[k], self.lr_mu[k] * grad_mu)
                     new_C_k_mu, new_Vs_k_mu = manifold.compute_normalization_constant(
                         new_mu_k, sigma[k], subkey, n_samples=self.S
                     )
@@ -176,46 +178,46 @@ class LANDMixtureModel:
                     new_loss_mu = -jnp.sum(r[:, k] * new_log_p_x_mu)
 
                     # Accept or Reject mu
-                    if new_loss_mu > comp_losses[k]:
-                        self.lr_mu *= self.lr_scale_down
+                    if new_loss_mu > k_losses[k]:
+                        self.lr_mu[k] *= self.lr_scale_down
                         current_log_maps = log_maps_all[k] # Revert: use old log maps for sigma step
                     else:
                         mu = mu.at[k].set(new_mu_k)
                         C[k] = new_C_k_mu
                         Vs[k] = new_Vs_k_mu
                         current_log_maps = new_log_maps # Accept: pass new log maps to sigma step
-                        comp_losses = comp_losses.at[k].set(new_loss_mu)
-                        self.lr_mu *= self.lr_scale_up
+                        k_losses = k_losses.at[k].set(new_loss_mu)
+                        self.lr_mu[k] *= self.lr_scale_up
 
-                    # === 2. UPDATE & CHECK SIGMA ===
+                    # compute grad sigma
                     self.key, subkey = jax.random.split(self.key)
                     grad_sigma = self._compute_grad_sigma(
                         mu[k], A[k], sigma[k], C[k], Vs[k], r[:, k], N_k, subkey, current_log_maps, manifold
                     )
 
                     # Propose new sigma
-                    new_A_k = A[k] - (self.lr_A * grad_sigma)
+                    new_A_k = A[k] - (self.lr_A[k] * grad_sigma)
                     new_sigma_k = jnp.linalg.inv(new_A_k.T @ new_A_k)
                     new_C_k_sig, new_Vs_k_sig = manifold.compute_normalization_constant(
                         mu[k], new_sigma_k, subkey, n_samples=self.S
                     )
 
-                    # Check the loss (we can reuse current_log_maps here)
+                    # Check the loss (we can reuse current_log_maps here because only depends on mu)
                     inv_new_sigma_k = jnp.linalg.inv(new_sigma_k)
                     new_dist_sq_sig = jnp.sum((current_log_maps @ inv_new_sigma_k) * current_log_maps, axis=-1)
                     new_log_p_x_sig = -jnp.log(new_C_k_sig) - 0.5 * new_dist_sq_sig
                     new_loss_sigma = -jnp.sum(r[:, k] * new_log_p_x_sig)
 
-                    # Accept or Reject sigma
-                    if new_loss_sigma > comp_losses[k]:
-                        self.lr_A *= self.lr_scale_down
+                    # Accept or reject sigma
+                    if new_loss_sigma > k_losses[k]:
+                        self.lr_A[k] *= self.lr_scale_down
                     else:
                         A = A.at[k].set(new_A_k)
                         sigma = sigma.at[k].set(new_sigma_k)
                         C[k] = new_C_k_sig
                         Vs[k] = new_Vs_k_sig
-                        comp_losses = comp_losses.at[k].set(new_loss_sigma)
-                        self.lr_A *= self.lr_scale_up
+                        k_losses = k_losses.at[k].set(new_loss_sigma)
+                        self.lr_A[k] *= self.lr_scale_up
 
                     # Update mixing weights
                     pi = pi.at[k].set(N_k / N)
