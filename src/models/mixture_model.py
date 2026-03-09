@@ -225,6 +225,12 @@ class LANDMixtureModel:
             gmm.fit(np.array(X))
             mu = [jnp.array(m, dtype=jnp.float32) for m in gmm.means_]
 
+            # Find the data point closest to the euclidean means to ensure we start on the manifold
+            closest_idxs = [
+                jnp.argmin(jnp.sum((X - mu[k]) ** 2, axis=1)) for k in range(self.K)
+            ]
+            mu = [X[idx].squeeze() for idx in closest_idxs]
+
         elif method == "mean":
             sorted_data = jnp.sort(X, axis=0)
             k_clusters = jnp.split(sorted_data, self.K)
