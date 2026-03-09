@@ -3,8 +3,22 @@ import jax.numpy as jnp
 from sklearn.mixture import GaussianMixture
 from tqdm import tqdm
 import numpy as np
+from dataclasses import dataclass
+
 
 from src.utils.land_utils import RiemannianManifold, compute_knn_initial_paths
+
+@dataclass
+class State:
+    """
+    A dataclass to hold the state of the model parameters for potential reversion during training.
+    """
+    mu: list[jnp.ndarray]
+    A: list[jnp.ndarray]
+    sigma: list[jnp.ndarray]
+    pi: jnp.ndarray
+    C: list[jnp.ndarray]
+    Vs: list[jnp.ndarray]
 
 
 class LANDMixtureModel:
@@ -14,13 +28,15 @@ class LANDMixtureModel:
         lr_mu: float = 1e-3,
         lr_A: float = 1e-3,
         S: int = 100,
+        lr_scale_down: float = 0.75,  # 0.75 as in the original LAND paper
+        lr_scale_up: float = 1.1,  # 1.1 as in the original LAND paper
         epsilon: float = 1e-3,
-        patience: int = 2,
+        patience: int = 5,
         sigma: float = 1.0,
         rho: float = 1e-3,
         K_segments: int = 5,
         n_neighbors: int = 5,
-        init_method: str = "random",
+        init_method: str = "GMM",
         seed: int = 42,
     ):
         """
@@ -49,6 +65,9 @@ class LANDMixtureModel:
         self.rho = rho
         self.K_segments = K_segments
         self.n_neighbors = n_neighbors
+
+        self.lr_scale_up = lr_scale_up
+        self.lr_scale_down = lr_scale_down
 
         self.init_method = init_method
         self.key = jax.random.key(seed)
@@ -101,6 +120,8 @@ class LANDMixtureModel:
                 log_maps_all = []
                 inv_sigmas = []
 
+                prevState = State(mu, A, sigma, pi, C, Vs)
+
                 # E-step: compute responsibilities
                 for k in range(self.K):
                     inv_sigma = jnp.linalg.inv(sigma[k])
@@ -110,6 +131,9 @@ class LANDMixtureModel:
                     log_maps_all.append(log_maps)
 
                     dist_sq = jnp.sum((log_maps @ inv_sigma) * log_maps, axis=-1)
+
+                    # Mask out points that are too far
+                    dist_sq = jnp.where(dist_sq > 0.3, 0, dist_sq)
 
                     # p_M(x_n | mu_k, Sigma_k)
                     p_x = (1.0 / C[k]) * jnp.exp(-0.5 * dist_sq)
@@ -123,11 +147,18 @@ class LANDMixtureModel:
                 # Calculate current negative log-likelihood to monitor convergence
                 current_loss = -jnp.sum(jnp.log(r_sum)) / N
 
-                if t > 0:
-                    loss_diff = current_loss - prev_loss
+                loss_diff = current_loss - prev_loss
+
+                # If the loss increased, revert to previous parameters and reduce learning rate
+                if loss_diff > 0:  
+                    mu, A, sigma, pi, C, Vs = prevState.mu, prevState.A, prevState.sigma, prevState.pi, prevState.C, prevState.Vs
+                    self.lr_A *= self.lr_scale_down
+                    loss_diff = 0.0 
+                else:
+                    self.lr_A *= self.lr_scale_up
 
                     # If the loss did not decrease significantly (or increased), increment counter
-                    if abs(loss_diff) <= self.epsilon or loss_diff > 0:
+                    if loss_diff <= self.epsilon:
                         n_wo_improvement += 1
                     else:
                         n_wo_improvement = 0

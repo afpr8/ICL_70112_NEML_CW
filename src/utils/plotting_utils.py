@@ -1,5 +1,7 @@
 import matplotlib.pyplot as plt
+import numpy as np
 
+from typing import List
 
 def plot_geodesics(ax, X, means, labels, geodesics):
     """
@@ -74,7 +76,16 @@ def plot_mixture_contours(ax, X, means, X_grid, Y_grid, Z, title, mean_label):
 
 
 def plot_full_comparison(
-    X, land_means, gmm_means, labels, geodesics, X_grid, Y_grid, Z_land, Z_gmm
+    X: np.ndarray,
+    land_means: np.ndarray,
+    gmm_means: np.ndarray,
+    labels: np.ndarray,
+    geodesics: List[np.ndarray],
+    X_grid: np.ndarray,
+    Y_grid: np.ndarray, 
+    Z_land: np.ndarray, 
+    Z_gmm: np.ndarray, 
+    init_method: str = ""
 ):
     """
     Creates a full 1x3 figure comparing geodesics, LAND contours, and GMM contours.
@@ -92,7 +103,7 @@ def plot_full_comparison(
         X_grid,
         Y_grid,
         Z_land,
-        title="LAND mixture model",
+        title=f"LAND mixture model - {init_method}",
         mean_label="LAND mean",
     )
 
