@@ -145,6 +145,31 @@ class LANDMixtureModel:
                 r_sum = jnp.clip(r_sum, a_min=1e-12)
                 r = r / r_sum
 
+                for k in range(self.K):
+                    N_k = r[:, k].sum()
+
+                    # Compute both gradients sharing MC samples
+                    self.key, subkey = jax.random.split(self.key)
+                    grad_mu = self._compute_grad_mu(
+                        mu[k],
+                        sigma[k],
+                        C[k],
+                        Vs[k],
+                        r[:, k],
+                        N_k,
+                        subkey,
+                        log_maps_all[k],
+                        manifold,
+                    )
+
+                    # update mu
+                    new_mu_k = manifold.exp_map(mu[k], self.lr_mu * grad_mu)
+                    mu = mu.at[k].set(new_mu_k)
+
+                    C[k] = manifold.compute_normalization_constant(
+                        mu[k], sigma[k], subkey, n_samples=self.S
+                    )[0]
+
                 # Calculate current negative log-likelihood to monitor convergence
                 current_loss = -jnp.sum(jnp.log(r_sum)) / N
 
@@ -153,10 +178,10 @@ class LANDMixtureModel:
                 # If the loss increased, revert to previous parameters and reduce learning rate
                 if loss_diff > 0:  
                     mu, A, sigma, pi, C, Vs = prevState.mu, prevState.A, prevState.sigma, prevState.pi, prevState.C, prevState.Vs
-                    self.lr_A *= self.lr_scale_down
+                    self.lr_mu *= self.lr_scale_down
                     loss_diff = 0.0 
                 else:
-                    self.lr_A *= self.lr_scale_up
+                    self.lr_mu *= self.lr_scale_up
 
                     # If the loss did not decrease significantly (or increased), increment counter
                     if loss_diff <= self.epsilon:
@@ -179,7 +204,7 @@ class LANDMixtureModel:
 
                     # Compute both gradients sharing MC samples
                     self.key, subkey = jax.random.split(self.key)
-                    grad_mu, grad_sigma = self._compute_grads_k(
+                    grad_sigma = self._compute_grad_sigma(
                         mu[k],
                         A[k],
                         sigma[k],
@@ -192,10 +217,7 @@ class LANDMixtureModel:
                         manifold,
                     )
 
-                    # update mu
-                    new_mu_k = manifold.exp_map(mu[k], self.lr_mu * grad_mu)
-                    mu = mu.at[k].set(new_mu_k)
-
+                    
                     # update A
                     new_A_k = A[k] - (self.lr_A * grad_sigma)
                     A = A.at[k].set(new_A_k)
@@ -214,6 +236,13 @@ class LANDMixtureModel:
                     )
                     C[k] = c_val
                     Vs[k] = v_s
+
+                if loss_diff > 0:  
+                    mu, A, sigma, pi, C, Vs = prevState.mu, prevState.A, prevState.sigma, prevState.pi, prevState.C, prevState.Vs
+                    self.lr_A *= self.lr_scale_down
+                    loss_diff = 0.0 
+                else:
+                    self.lr_A *= self.lr_scale_up
 
                 t += 1
 
@@ -315,6 +344,114 @@ class LANDMixtureModel:
 
         return mu, jnp.stack(A), jnp.stack(sigma)
 
+    def _compute_grad_mu(
+        self,
+        mu: jnp.ndarray,
+        sigma: jnp.ndarray,
+        norm_const: jnp.ndarray,
+        v_samples: jnp.ndarray,
+        r_k: jnp.ndarray,
+        N_k: jnp.ndarray,
+        key: jax.Array,
+        log_maps: jnp.ndarray,
+        manifold: RiemannianManifold,
+    ) -> jnp.ndarray:
+        """
+        Compute the gradient of the log-likelihood with respect to the spatial mean (mu)
+        for a single mixture component.
+
+        The gradient relies on two terms: a responsibility-weighted empirical mean in the
+        tangent space (via the Riemannian log map on data points X), and an intractable
+        integral term representing the gradient of the normalisation constant.
+        Params:
+            mu (jnp.ndarray): The mean of the component distribution
+            sigma (jnp.ndarray): The covariance of the component distribution
+            norm_const (jnp.ndarray): The normalisation constant of the component
+            v_samples (jnp.ndarray): The samples used to compute the normalisation constant
+            r_k (jnp.ndarray): Responsibility of this component for each point, shape (N,)
+            N_k (jnp.ndarray): Sum of responsibilities for this component
+            key (jax.Array): Random key for operations
+            log_maps (jnp.ndarray): Pre-computed log maps of all data points at mu, shape (N, D)
+            manifold (RiemannianManifold): The Riemannian manifold
+        Returns:
+            jnp.ndarray: The gradient of the log-likelihood with respect to mu
+        """
+        # Compute log_map part of the gradient (responsibility-weighted mean in tangent space)
+        # We multiply each log map by its corresponding responsibility before summing
+        grad_mu_log_map = jnp.sum(r_k[:, None] * log_maps, axis=0) / N_k
+
+        # Compute exp_map part of the gradient (MC estimate of normalisation integral)
+        d = mu.shape[0]
+        mc_scale = jnp.sqrt((2 * jnp.pi) ** d * jnp.linalg.det(sigma)) / (
+            self.S * norm_const
+        )
+
+        def exp_loss(v):
+            translated_point = manifold.exp_map(mu, v)
+            M_trans = manifold.metric(translated_point)
+            m_val = jnp.sqrt(jnp.linalg.det(M_trans))
+            return m_val * v
+
+        grad_mu_exp_map = -mc_scale * jnp.sum(jax.vmap(exp_loss)(v_samples), axis=0)
+        
+        return grad_mu_log_map + grad_mu_exp_map
+
+    def _compute_grad_sigma(
+        self,
+        mu: jnp.ndarray,
+        A: jnp.ndarray,
+        sigma: jnp.ndarray,
+        norm_const: jnp.ndarray,
+        v_samples: jnp.ndarray,
+        r_k: jnp.ndarray,
+        N_k: jnp.ndarray,
+        key: jax.Array,
+        log_maps: jnp.ndarray,
+        manifold: RiemannianManifold,
+    ) -> jnp.ndarray:
+        """
+        Compute the gradient of the log-likelihood with respect to the precision factor A
+        for a single mixture component.
+
+        The gradient with respect to the covariance matrix sigma is composed of a responsibility-weighted
+        empirical covariance term involving the log-mapped data, and a sampled
+        integral term for the normalisation constant. The final gradient returned is with
+        respect to the matrix A (where A.T @ A = inv(sigma)) through the chain rule.
+        Params:
+            mu (jnp.ndarray): The mean of the component distribution
+            A (jnp.ndarray): The A matrix of the component distribution
+            sigma (jnp.ndarray): The covariance of the component distribution
+            norm_const (jnp.ndarray): The normalisation constant of the component
+            v_samples (jnp.ndarray): The samples used to compute the normalisation constant
+            r_k (jnp.ndarray): Responsibility of this component for each point, shape (N,)
+            N_k (jnp.ndarray): Sum of responsibilities for this component
+            key (jax.Array): Random key for operations
+            log_maps (jnp.ndarray): Pre-computed log maps of all data points at mu, shape (N, D)
+            manifold (RiemannianManifold): The Riemannian manifold
+        Returns:
+            jnp.ndarray: The gradient of the log-likelihood with respect to A matrix
+        """
+        # Compute log_map part of the gradient (responsibility-weighted outer product in tangent space)
+        # Multiply each log map by its responsibility before computing the dot product
+        grad_sigma_log_map = ((log_maps * r_k[:, None]).T @ log_maps) / N_k
+
+        # Compute exp_map part of the gradient (MC estimate of normalisation integral)
+        d = mu.shape[0]
+        mc_scale = jnp.sqrt((2 * jnp.pi) ** d * jnp.linalg.det(sigma)) / (
+            self.S * norm_const
+        )
+
+        def exp_outer(v):
+            translated_point = manifold.exp_map(mu, v)
+            M_trans = manifold.metric(translated_point)
+            # Retaining your diagonal metric tensor assumption here
+            m_val = jnp.exp(0.5 * jnp.sum(jnp.log(jnp.diag(M_trans))))
+            return m_val * jnp.outer(v, v)
+
+        grad_sigma_exp_map = -mc_scale * jnp.sum(jax.vmap(exp_outer)(v_samples), axis=0)
+        
+        return A @ (grad_sigma_log_map + grad_sigma_exp_map)
+    
     def _compute_grads_k(
         self,
         mu: jnp.ndarray,
