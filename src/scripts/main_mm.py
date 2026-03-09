@@ -78,11 +78,11 @@ def evaluate_land_density(
     K = len(mu_list)
 
     for k in range(K):
-        m_np = np.array(mu_list[k])
+        mu_np = np.array(mu_list[k])
         
         # Compute paths and geodesics ONLY for valid points for this component
         paths = compute_knn_initial_paths(
-            m_np, valid_grid_points, manifold, N_points=manifold.K_segments + 1
+            mu_np, valid_grid_points, manifold, N_points=manifold.K_segments + 1
         )
         log_maps = manifold.log_map_batch(
             mu_list[k], valid_grid_tensor, jnp.array(paths)
@@ -110,7 +110,7 @@ def main() -> None:
     X_tensor = jnp.array(X_np, dtype=jnp.float32)
 
     # Define hyperparams matching the LAND setup
-    sigma, rho = 0.3, 1e-3
+    sigma, rho = 0.15, 1e-3
     K_segments = 10
     
     # Instantiate the shared manifold structure
@@ -174,8 +174,8 @@ def main() -> None:
     x_min, x_max = X_np[:, 0].min() - 0.5, X_np[:, 0].max() + 0.5
     y_min, y_max = X_np[:, 1].min() - 0.5, X_np[:, 1].max() + 0.5
     xx, yy = np.meshgrid(
-        np.linspace(x_min, x_max, 20), 
-        np.linspace(y_min, y_max, 20)
+        np.linspace(x_min, x_max, 10), 
+        np.linspace(y_min, y_max, 10)
     ) 
     
     # GMM Contours
