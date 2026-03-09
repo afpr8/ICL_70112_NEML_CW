@@ -29,12 +29,12 @@ class LANDMixtureModel:
         lr_scale_down: float = 0.75,  # 0.75 as in the original LAND paper
         lr_scale_up: float = 1.1,  # 1.1 as in the original LAND paper
         epsilon: float = 1e-3,
-        patience: int = 10,
+        patience: int = 5,
         sigma: float = 1.0,
         rho: float = 1e-3,
         K_segments: int = 5,
         n_neighbors: int = 5,
-        init_method: str = "random",
+        init_method: str = "GMM",
         seed: int = 42,
     ):
         """
