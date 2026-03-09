@@ -13,6 +13,7 @@ from scipy.special import logsumexp
 from sklearn.cluster import KMeans
 from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
 from sklearn.mixture import GaussianMixture
+from tqdm import tqdm
 
 from src.data.synthetic import sample_non_linear_data
 from src.models.mixture_model import LANDMixtureModel
@@ -23,11 +24,11 @@ from src.utils.plotting_utils import plot_mixture_contours
 @dataclass
 class ExperimentConfig:
     n_datasets: int = 1
-    n_samples_per_dataset: int = 300
+    n_samples_per_dataset: int = 220
     n_true_components: int = 20
     k_min: int = 1
     k_max: int = 4
-    n_eval_samples: int = 10_000
+    n_eval_samples: int = 2000
     x_rad: float = 0.75
     y_rad: float = 1.5
     std: float = 0.15
@@ -37,11 +38,13 @@ class ExperimentConfig:
     n_neighbors: int = 5
     land_lr_mu: float = 1e-2
     land_lr_A: float = 1e-2
-    land_S: int = 3000
+    land_S: int = 400
     land_eps: float = 1e-3
     contour_cutoff_std: float = 2.0
+    contour_grid_size: int = 28
     seed: int = 42
-    clustering_K: int = 20
+    clustering_K: int = 10
+    kmeans_n_init: int = 8
 
 
 @dataclass
@@ -58,8 +61,9 @@ class LeastSquaresGaussianModel:
         K: int,
         seed: int,
         reg: float = 1e-6,
+        n_init: int = 8,
     ) -> "LeastSquaresGaussianModel":
-        kmeans = KMeans(n_clusters=K, random_state=seed, n_init=20)
+        kmeans = KMeans(n_clusters=K, random_state=seed, n_init=n_init)
         labels = kmeans.fit_predict(X)
         centroids = kmeans.cluster_centers_
         N, D = X.shape
@@ -253,13 +257,19 @@ def fit_land(
 def run_nll_experiment(
     cfg: ExperimentConfig, output_dir: Path
 ) -> dict[str, dict[str, list[float]]]:
+    print(
+        f"[SYNTH] NLL experiment: datasets={cfg.n_datasets}, K={cfg.k_min}..{cfg.k_max}, eval_samples={cfg.n_eval_samples}",
+        flush=True,
+    )
     means = true_component_means(cfg)
     Ks = list(range(cfg.k_min, cfg.k_max + 1))
     models = ["LAND", "GMM", "LeastSquares"]
 
     nll_scores = {m: {str(k): [] for k in Ks} for m in models}
 
-    for ds_idx in range(cfg.n_datasets):
+    for ds_idx in tqdm(
+        range(cfg.n_datasets), desc="[SYNTH] Datasets (NLL)", unit="dataset"
+    ):
         X_t, _, _ = sample_non_linear_data(
             n_samples=cfg.n_samples_per_dataset,
             n_components=cfg.n_true_components,
@@ -280,7 +290,9 @@ def run_nll_experiment(
             n_neighbors=cfg.n_neighbors,
         )
 
-        for K in Ks:
+        for K in tqdm(
+            Ks, desc=f"[SYNTH] Dataset {ds_idx + 1} K-sweep", unit="K", leave=False
+        ):
             gmm = GaussianMixture(
                 n_components=K, covariance_type="full", random_state=cfg.seed + ds_idx
             )
@@ -289,7 +301,12 @@ def run_nll_experiment(
             gmm_nll = -true_logpdf(gmm_samples, cfg, means).mean()
             nll_scores["GMM"][str(K)].append(float(gmm_nll))
 
-            ls_model = LeastSquaresGaussianModel.fit(X, K=K, seed=cfg.seed + ds_idx)
+            ls_model = LeastSquaresGaussianModel.fit(
+                X,
+                K=K,
+                seed=cfg.seed + ds_idx,
+                n_init=cfg.kmeans_n_init,
+            )
             ls_samples = ls_model.sample(
                 cfg.n_eval_samples, seed=cfg.seed + 10_000 + ds_idx
             )
@@ -335,6 +352,7 @@ def run_nll_experiment(
 
 
 def run_contour_experiment(cfg: ExperimentConfig, output_dir: Path) -> dict[str, float]:
+    print("[SYNTH] Contour experiment (K=2) starting", flush=True)
     X_t, _, _ = sample_non_linear_data(
         n_samples=cfg.n_samples_per_dataset,
         n_components=cfg.n_true_components,
@@ -363,7 +381,10 @@ def run_contour_experiment(cfg: ExperimentConfig, output_dir: Path) -> dict[str,
 
     x_min, x_max = X[:, 0].min() - 0.5, X[:, 0].max() + 0.5
     y_min, y_max = X[:, 1].min() - 0.5, X[:, 1].max() + 0.5
-    xx, yy = np.meshgrid(np.linspace(x_min, x_max, 40), np.linspace(y_min, y_max, 40))
+    xx, yy = np.meshgrid(
+        np.linspace(x_min, x_max, cfg.contour_grid_size),
+        np.linspace(y_min, y_max, cfg.contour_grid_size),
+    )
 
     grid_points = np.c_[xx.ravel(), yy.ravel()]
     z_gmm = np.exp(gmm.score_samples(grid_points)).reshape(xx.shape)
@@ -376,6 +397,10 @@ def run_contour_experiment(cfg: ExperimentConfig, output_dir: Path) -> dict[str,
         land_pi,
         manifold,
         cutoff_std=cfg.contour_cutoff_std,
+    )
+    print(
+        f"[SYNTH] Contour grid evaluated with cutoff_std={cfg.contour_cutoff_std}",
+        flush=True,
     )
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
@@ -412,10 +437,16 @@ def run_contour_experiment(cfg: ExperimentConfig, output_dir: Path) -> dict[str,
 def run_clustering_experiment(
     cfg: ExperimentConfig, output_dir: Path
 ) -> dict[str, float]:
+    print(
+        f"[SYNTH] Clustering experiment: datasets={cfg.n_datasets}, K={cfg.clustering_K}",
+        flush=True,
+    )
     ari_scores = {"LAND": [], "GMM": [], "LeastSquares": []}
     nmi_scores = {"LAND": [], "GMM": [], "LeastSquares": []}
 
-    for ds_idx in range(cfg.n_datasets):
+    for ds_idx in tqdm(
+        range(cfg.n_datasets), desc="[SYNTH] Datasets (cluster)", unit="dataset"
+    ):
         X_t, _, y_t = sample_non_linear_data(
             n_samples=cfg.n_samples_per_dataset,
             n_components=cfg.n_true_components,
@@ -436,7 +467,12 @@ def run_clustering_experiment(
         )
         y_gmm = gmm.fit_predict(X)
 
-        ls_model = LeastSquaresGaussianModel.fit(X, K=K, seed=cfg.seed + ds_idx)
+        ls_model = LeastSquaresGaussianModel.fit(
+            X,
+            K=K,
+            seed=cfg.seed + ds_idx,
+            n_init=cfg.kmeans_n_init,
+        )
         y_ls = ls_model.predict(X)
 
         land_mu, land_sigma, land_C, land_pi = fit_land(
@@ -513,19 +549,21 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run LAND paper synthetic experiments")
     parser.add_argument("--output-dir", type=str, default="plots/synthetic_land_paper")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--n-datasets", type=int, default=10)
-    parser.add_argument("--n-samples", type=int, default=300)
-    parser.add_argument("--n-eval-samples", type=int, default=10_000)
+    parser.add_argument("--n-datasets", type=int, default=3)
+    parser.add_argument("--n-samples", type=int, default=220)
+    parser.add_argument("--n-eval-samples", type=int, default=2000)
     parser.add_argument("--k-min", type=int, default=1)
     parser.add_argument("--k-max", type=int, default=4)
-    parser.add_argument("--clustering-k", type=int, default=20)
+    parser.add_argument("--clustering-k", type=int, default=10)
     parser.add_argument("--sigma-metric", type=float, default=0.15)
     parser.add_argument("--rho-metric", type=float, default=1e-3)
-    parser.add_argument("--k-segments", type=int, default=6)
+    parser.add_argument("--k-segments", type=int, default=5)
     parser.add_argument("--n-neighbors", type=int, default=7)
-    parser.add_argument("--land-S", type=int, default=300)
+    parser.add_argument("--land-S", type=int, default=400)
     parser.add_argument("--land-eps", type=float, default=1e-3)
     parser.add_argument("--contour-cutoff-std", type=float, default=2.0)
+    parser.add_argument("--contour-grid-size", type=int, default=28)
+    parser.add_argument("--kmeans-n-init", type=int, default=8)
     return parser.parse_args()
 
 
@@ -547,8 +585,10 @@ def main() -> None:
         land_S=args.land_S,
         land_eps=args.land_eps,
         contour_cutoff_std=args.contour_cutoff_std,
+        contour_grid_size=args.contour_grid_size,
         seed=args.seed,
         clustering_K=args.clustering_k,
+        kmeans_n_init=args.kmeans_n_init,
     )
 
     print("Running synthetic NLL experiment...")

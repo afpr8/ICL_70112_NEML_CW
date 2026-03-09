@@ -5,6 +5,7 @@ import csv
 import json
 import time
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable
 
@@ -13,11 +14,11 @@ import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.special import logsumexp
-from sklearn.cluster import KMeans
 from sklearn.datasets import fetch_openml, make_moons, make_s_curve, load_digits
 from sklearn.decomposition import PCA
 from sklearn.metrics import f1_score
 from sklearn.mixture import GaussianMixture
+from tqdm import tqdm
 
 from src.data.physionet_eeg import (
     apply_nmf,
@@ -34,8 +35,6 @@ from src.experiments.synthetic_land_paper import (
     run_clustering_experiment,
     run_contour_experiment,
     run_nll_experiment,
-    true_component_means,
-    true_logpdf,
 )
 from src.models.land import LANDMLE
 from src.utils.land_utils import RiemannianManifold, compute_knn_initial_paths
@@ -46,13 +45,36 @@ from src.utils.plotting_utils import plot_mixture_contours
 class FullPaperConfig:
     seed: int = 42
     output_dir: str = "plots/land_paper_full"
-    synthetic_samples: int = 300
+    synthetic_samples: int = 220
     synthetic_datasets: int = 1
-    synthetic_eval_samples: int = 10_000
+    synthetic_eval_samples: int = 2000
     synthetic_k_min: int = 1
-    synthetic_k_max: int = 4
-    synthetic_clustering_k: int = 20
-    land_mc_samples: int = 3000
+    synthetic_k_max: int = 3
+    synthetic_clustering_k: int = 10
+    land_mc_samples: int = 600
+    kmeans_n_init: int = 8
+    fig_grid_size: int = 36
+    fig_geodesic_subset: int = 30
+    fig12_k_max: int = 3
+    eeg_subjects: int = 4
+    eeg_nmf_starts: int = 4
+    eeg_land_S: int = 300
+    eeg_sigma_min: float = 0.7
+    eeg_sigma_max: float = 1.3
+    eeg_sigma_step: float = 0.3
+    normalization_grid_size: int = 45
+    normalization_mc_runs: int = 4
+    normalization_mc_max_samples: int = 1200
+    normalization_mc_step: int = 200
+    mnist_samples: int = 120
+    mnist_source: str = "digits"
+    mnist_grid_size: int = 50
+    mnist_geodesic_subset: int = 25
+    mnist_ls_k: int = 4
+    scalability_samples: int = 600
+    scalability_targets: int = 10
+    scalability_dim_max: int = 40
+    model_selection_k_max: int = 3
     run_eeg: bool = True
     run_mnist: bool = True
     run_scalability: bool = True
@@ -62,6 +84,10 @@ class FullPaperConfig:
 
 def _ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
+
+
+def _log(msg: str) -> None:
+    print(f"[LAND-PAPER] {msg}", flush=True)
 
 
 def _ls_logpdf(X: np.ndarray, ls_model: LeastSquaresGaussianModel) -> np.ndarray:
@@ -108,14 +134,23 @@ def _land_logpdf(
     return logsumexp(np.stack(terms, axis=1), axis=1)
 
 
-def _mnist_digit_one(seed: int, n_samples: int = 200) -> np.ndarray:
-    try:
+@lru_cache(maxsize=2)
+def _mnist_digit_pool(source: str) -> np.ndarray:
+    if source == "openml":
         X, y = fetch_openml("mnist_784", version=1, return_X_y=True, as_frame=False)
-        y = y.astype(str)
-        X_ones = X[y == "1"]
-    except Exception:
-        digits = load_digits()
-        X_ones = digits.data[digits.target == 1]
+        y = np.asarray(y).astype(str)
+        return np.asarray(X)[y == "1"]
+
+    digits = load_digits(return_X_y=False)
+    return np.asarray(digits.data)[np.asarray(digits.target) == 1]
+
+
+def _mnist_digit_one(
+    seed: int,
+    n_samples: int = 200,
+    source: str = "digits",
+) -> np.ndarray:
+    X_ones = _mnist_digit_pool(source)
 
     rng = np.random.default_rng(seed)
     idx = rng.choice(
@@ -125,6 +160,7 @@ def _mnist_digit_one(seed: int, n_samples: int = 200) -> np.ndarray:
 
 
 def _plot_fig12_all_k(cfg: ExperimentConfig, output_dir: Path) -> None:
+    _log("Fig.12: generating all-K contour panels")
     X_t, _, _ = sample_non_linear_data(
         n_samples=cfg.n_samples_per_dataset,
         n_components=cfg.n_true_components,
@@ -139,11 +175,17 @@ def _plot_fig12_all_k(cfg: ExperimentConfig, output_dir: Path) -> None:
 
     x_min, x_max = X[:, 0].min() - 0.5, X[:, 0].max() + 0.5
     y_min, y_max = X[:, 1].min() - 0.5, X[:, 1].max() + 0.5
-    xx, yy = np.meshgrid(np.linspace(x_min, x_max, 60), np.linspace(y_min, y_max, 60))
+    xx, yy = np.meshgrid(
+        np.linspace(x_min, x_max, cfg.fig_grid_size),
+        np.linspace(y_min, y_max, cfg.fig_grid_size),
+    )
     grid = np.c_[xx.ravel(), yy.ravel()]
 
-    fig, axes = plt.subplots(4, 3, figsize=(14, 16))
-    for row, K in enumerate(range(1, 5)):
+    k_vals = list(range(1, min(4, cfg.fig12_k_max) + 1))
+    fig, axes = plt.subplots(len(k_vals), 3, figsize=(14, 4 * len(k_vals)))
+    if len(k_vals) == 1:
+        axes = np.array([axes])
+    for row, K in enumerate(tqdm(k_vals, desc="[LAND-PAPER] Fig.12 K", unit="K")):
         manifold = RiemannianManifold(
             X_jnp,
             sigma=cfg.sigma_metric,
@@ -158,7 +200,9 @@ def _plot_fig12_all_k(cfg: ExperimentConfig, output_dir: Path) -> None:
             xx, yy, land_mu, land_sigma, land_C, land_pi, manifold
         )
 
-        ls_model = LeastSquaresGaussianModel.fit(X, K=K, seed=cfg.seed + K)
+        ls_model = LeastSquaresGaussianModel.fit(
+            X, K=K, seed=cfg.seed + K, n_init=cfg.kmeans_n_init
+        )
         z_ls = np.exp(_ls_logpdf(grid, ls_model)).reshape(xx.shape)
 
         gmm = GaussianMixture(
@@ -235,7 +279,10 @@ def _land_contour_and_geodesic_figure(
 
     x_min, x_max = X[:, 0].min() - 0.5, X[:, 0].max() + 0.5
     y_min, y_max = X[:, 1].min() - 0.5, X[:, 1].max() + 0.5
-    xx, yy = np.meshgrid(np.linspace(x_min, x_max, 60), np.linspace(y_min, y_max, 60))
+    xx, yy = np.meshgrid(
+        np.linspace(x_min, x_max, cfg.fig_grid_size),
+        np.linspace(y_min, y_max, cfg.fig_grid_size),
+    )
     z_land = evaluate_land_density_grid(
         xx, yy, land_mu, land_sigma, land_C, land_pi, manifold
     )
@@ -248,12 +295,15 @@ def _land_contour_and_geodesic_figure(
 
 
 def _plot_fig6_fig11(cfg: ExperimentConfig, output_dir: Path) -> None:
+    _log("Fig.6/Fig.11: generating clustering visual comparisons")
     datasets = _build_two_clustering_datasets(cfg.seed)
 
     fig6, axes6 = plt.subplots(2, 3, figsize=(14, 8))
     fig11, axes11 = plt.subplots(2, 3, figsize=(14, 8))
 
-    for row, X in enumerate(datasets):
+    for row, X in enumerate(
+        tqdm(datasets, desc="[LAND-PAPER] Fig.6/11 datasets", unit="dataset")
+    ):
         xx, yy, z_land, z_gmm, land_mu, land_sigma, land_C, land_pi, manifold = (
             _land_contour_and_geodesic_figure(X, cfg)
         )
@@ -274,11 +324,18 @@ def _plot_fig6_fig11(cfg: ExperimentConfig, output_dir: Path) -> None:
         )
 
         subset = np.random.default_rng(cfg.seed + row).choice(
-            X.shape[0], size=min(80, X.shape[0]), replace=False
+            X.shape[0], size=min(cfg.fig_geodesic_subset, X.shape[0]), replace=False
         )
         X_sub = X[subset]
         X_sub_jnp = jnp.array(X_sub, dtype=jnp.float32)
-        for i, x in enumerate(X_sub):
+        for i, x in enumerate(
+            tqdm(
+                X_sub,
+                desc=f"[LAND-PAPER] Geodesics row={row + 1}",
+                unit="point",
+                leave=False,
+            )
+        ):
             c = int(labels_land[subset[i]])
             path_init = compute_knn_initial_paths(
                 np.array(land_mu[c]),
@@ -330,7 +387,9 @@ def _plot_fig6_fig11(cfg: ExperimentConfig, output_dir: Path) -> None:
             mean_label="GMM mean",
         )
 
-        ls = LeastSquaresGaussianModel.fit(X, K=2, seed=cfg.seed + row)
+        ls = LeastSquaresGaussianModel.fit(
+            X, K=2, seed=cfg.seed + row, n_init=cfg.kmeans_n_init
+        )
         z_ls = np.exp(_ls_logpdf(np.c_[xx.ravel(), yy.ravel()], ls)).reshape(xx.shape)
         plot_mixture_contours(
             axes11[row, 0],
@@ -373,18 +432,24 @@ def _plot_fig6_fig11(cfg: ExperimentConfig, output_dir: Path) -> None:
 
 
 def _run_eeg_experiment(cfg: FullPaperConfig, output_dir: Path) -> dict[str, object]:
+    _log("EEG: starting sleep-stage experiment")
     label_map = {"non-REM": 0, "REM": 1, "awake": 2}
-    subjects = select_subjects(n_subjects=10, random_state=cfg.seed)
+    subjects = select_subjects(n_subjects=cfg.eeg_subjects, random_state=cfg.seed)
 
     rows: list[dict[str, float | int]] = []
-    sigma_grid = np.round(np.arange(0.5, 1.51, 0.1), 2)
+    sigma_grid = np.round(
+        np.arange(cfg.eeg_sigma_min, cfg.eeg_sigma_max + 1e-9, cfg.eeg_sigma_step), 2
+    )
     sigma_curve_ref: dict[str, float] = {}
 
-    for subj in subjects:
+    for subj in tqdm(subjects, desc="[LAND-PAPER] EEG subjects", unit="subject"):
+        _log(f"EEG: subject {int(subj)} feature extraction + model fitting")
         feats, labels, _ = extract_subject_features(subj)
         X = np.array(feats)
-        y = np.array([label_map[l] for l in labels])
-        X5 = apply_nmf(X, n_components=5, n_starts=10, random_state=cfg.seed)
+        y = np.array([label_map[label] for label in labels])
+        X5 = apply_nmf(
+            X, n_components=5, n_starts=cfg.eeg_nmf_starts, random_state=cfg.seed
+        )
         X_jnp = jnp.array(X5, dtype=jnp.float32)
 
         K = 3
@@ -400,7 +465,7 @@ def _run_eeg_experiment(cfg: FullPaperConfig, output_dir: Path) -> dict[str, obj
             rho_metric=1e-3,
             K_segments=5,
             n_neighbors=7,
-            land_S=600,
+            land_S=cfg.eeg_land_S,
             land_eps=1e-3,
         )
         land_mu, land_sigma, land_C, land_pi = fit_land(
@@ -414,14 +479,19 @@ def _run_eeg_experiment(cfg: FullPaperConfig, output_dir: Path) -> dict[str, obj
 
         best_sigma, best_f = 1.0, f_land
         sigma_curve = {}
-        for sig in sigma_grid:
+        for sig in tqdm(
+            sigma_grid,
+            desc=f"[LAND-PAPER] EEG sigma sweep s{subj}",
+            unit="sigma",
+            leave=False,
+        ):
             t_cfg = ExperimentConfig(
                 seed=cfg.seed,
                 sigma_metric=float(sig),
                 rho_metric=1e-3,
                 K_segments=5,
                 n_neighbors=7,
-                land_S=600,
+                land_S=cfg.eeg_land_S,
                 land_eps=1e-3,
             )
             t_mu, t_sigma, t_C, t_pi = fit_land(X_jnp, K=K, cfg=t_cfg, seed=cfg.seed)
@@ -457,9 +527,12 @@ def _run_eeg_experiment(cfg: FullPaperConfig, output_dir: Path) -> dict[str, obj
     focus_subject = 15 if 15 in subjects else int(subjects[0])
     f_feats, f_labels, _ = extract_subject_features(focus_subject)
     Xf = apply_nmf(
-        np.array(f_feats), n_components=5, n_starts=10, random_state=cfg.seed
+        np.array(f_feats),
+        n_components=5,
+        n_starts=cfg.eeg_nmf_starts,
+        random_state=cfg.seed,
     )
-    yf = np.array([label_map[l] for l in f_labels])
+    yf = np.array([label_map[label] for label in f_labels])
 
     fig7 = plt.figure(figsize=(7, 5))
     ax = fig7.add_subplot(111, projection="3d")
@@ -483,9 +556,12 @@ def _run_eeg_experiment(cfg: FullPaperConfig, output_dir: Path) -> dict[str, obj
     for i, subj in enumerate(top_subjects):
         feats, labels, _ = extract_subject_features(int(subj))
         Xs = apply_nmf(
-            np.array(feats), n_components=5, n_starts=10, random_state=cfg.seed
+            np.array(feats),
+            n_components=5,
+            n_starts=cfg.eeg_nmf_starts,
+            random_state=cfg.seed,
         )
-        ys = np.array([label_map[l] for l in labels])
+        ys = np.array([label_map[label] for label in labels])
         ax = fig10.add_subplot(gs[0, i], projection="3d")
         ax.scatter(Xs[:, 0], Xs[:, 1], Xs[:, 2], s=5, c=colors[ys])
         ax.set_title(f"s{int(subj):03d}")
@@ -519,6 +595,7 @@ def _run_eeg_experiment(cfg: FullPaperConfig, output_dir: Path) -> dict[str, obj
 def _run_normalization_constant_experiment(
     cfg: FullPaperConfig, output_dir: Path
 ) -> dict[str, float]:
+    _log("Fig.8: normalization constant estimation")
     X_t, _ = sample_non_linear_data(n_samples=300, seed=cfg.seed)
     X = X_t.numpy()
     X_jnp = jnp.array(X, dtype=jnp.float32)
@@ -528,6 +605,7 @@ def _run_normalization_constant_experiment(
         initial_lr_A=1e-2,
         S=cfg.land_mc_samples,
         epsilon=1e-3,
+        patience=5,
         sigma=0.15,
         rho=1e-3,
         K_segments=6,
@@ -539,27 +617,43 @@ def _run_normalization_constant_experiment(
 
     inv_sigma = jnp.linalg.inv(sigma)
     bound = 3.5 * float(np.sqrt(np.max(np.diag(np.array(sigma)))))
-    vx = np.linspace(-bound, bound, 100)
-    vy = np.linspace(-bound, bound, 100)
+    vx = np.linspace(-bound, bound, cfg.normalization_grid_size)
+    vy = np.linspace(-bound, bound, cfg.normalization_grid_size)
     Vx, Vy = np.meshgrid(vx, vy)
     points = np.c_[Vx.ravel(), Vy.ravel()]
 
     values = []
-    for v in points:
+    for v in tqdm(points, desc="[LAND-PAPER] Fig.8 grid integration", unit="point"):
         vj = jnp.array(v, dtype=jnp.float32)
         x_map = manifold.exp_map(mu, vj)
         vol = jnp.sqrt(jnp.linalg.det(manifold.metric(x_map)))
         gauss = jnp.exp(-0.5 * (vj @ inv_sigma @ vj))
         values.append(float(gauss * vol))
     Z = np.array(values).reshape(Vx.shape)
-    numeric = np.trapz(np.trapz(Z, vx, axis=1), vy)
+    if hasattr(np, "trapezoid"):
+        numeric = np.trapezoid(np.trapezoid(Z, vx, axis=1), vy)
+    else:
+        numeric = np.trapz(np.trapz(Z, vx, axis=1), vy)
 
-    sample_sizes = list(range(100, 3001, 100))
+    sample_sizes = list(
+        range(
+            cfg.normalization_mc_step,
+            cfg.normalization_mc_max_samples + 1,
+            cfg.normalization_mc_step,
+        )
+    )
     curves = []
-    for run in range(10):
+    for run in tqdm(
+        range(cfg.normalization_mc_runs), desc="[LAND-PAPER] Fig.8 MC runs", unit="run"
+    ):
         run_vals = []
         key = jax.random.key(cfg.seed + run)
-        for s in sample_sizes:
+        for s in tqdm(
+            sample_sizes,
+            desc=f"[LAND-PAPER] Fig.8 samples run={run + 1}",
+            unit="S",
+            leave=False,
+        ):
             key, sub = jax.random.split(key)
             c_hat, _ = manifold.compute_normalization_constant(
                 mu, sigma, sub, n_samples=s
@@ -590,8 +684,15 @@ def _run_normalization_constant_experiment(
 
 
 def _run_mnist_experiment(cfg: FullPaperConfig, output_dir: Path) -> dict[str, float]:
-    X_mnist = _mnist_digit_one(cfg.seed, n_samples=200)
-    X_2d = PCA(n_components=2, random_state=cfg.seed).fit_transform(X_mnist)
+    _log("MNIST: starting digit-1 manifold experiment")
+    X_mnist = _mnist_digit_one(
+        cfg.seed,
+        n_samples=cfg.mnist_samples,
+        source=cfg.mnist_source,
+    )
+    X_2d = PCA(
+        n_components=2, svd_solver="randomized", random_state=cfg.seed
+    ).fit_transform(X_mnist)
     X_jnp = jnp.array(X_2d, dtype=jnp.float32)
 
     land = LANDMLE(
@@ -599,6 +700,7 @@ def _run_mnist_experiment(cfg: FullPaperConfig, output_dir: Path) -> dict[str, f
         initial_lr_A=1e-2,
         S=cfg.land_mc_samples,
         epsilon=1e-3,
+        patience=5,
         sigma=1.0,
         rho=1e-3,
         K_segments=6,
@@ -609,7 +711,9 @@ def _run_mnist_experiment(cfg: FullPaperConfig, output_dir: Path) -> dict[str, f
         X_jnp, sigma=1.0, rho=1e-3, K_segments=6, n_neighbors=7
     )
 
-    ls = LeastSquaresGaussianModel.fit(X_2d, K=6, seed=cfg.seed)
+    ls = LeastSquaresGaussianModel.fit(
+        X_2d, K=cfg.mnist_ls_k, seed=cfg.seed, n_init=cfg.kmeans_n_init
+    )
     gmm_linear = GaussianMixture(
         n_components=1, covariance_type="full", random_state=cfg.seed
     )
@@ -617,7 +721,10 @@ def _run_mnist_experiment(cfg: FullPaperConfig, output_dir: Path) -> dict[str, f
 
     x_min, x_max = X_2d[:, 0].min() - 1.0, X_2d[:, 0].max() + 1.0
     y_min, y_max = X_2d[:, 1].min() - 1.0, X_2d[:, 1].max() + 1.0
-    xx, yy = np.meshgrid(np.linspace(x_min, x_max, 80), np.linspace(y_min, y_max, 80))
+    xx, yy = np.meshgrid(
+        np.linspace(x_min, x_max, cfg.mnist_grid_size),
+        np.linspace(y_min, y_max, cfg.mnist_grid_size),
+    )
     grid = np.c_[xx.ravel(), yy.ravel()]
 
     distances = manifold.nn_tree.kneighbors(grid, 1, return_distance=True)[0]
@@ -646,9 +753,11 @@ def _run_mnist_experiment(cfg: FullPaperConfig, output_dir: Path) -> dict[str, f
         [float(mu[0])], [float(mu[1])], marker="D", c="orange", s=90, edgecolors="black"
     )
     subset = np.random.default_rng(cfg.seed).choice(
-        X_2d.shape[0], size=min(60, X_2d.shape[0]), replace=False
+        X_2d.shape[0], size=min(cfg.mnist_geodesic_subset, X_2d.shape[0]), replace=False
     )
-    for i in subset:
+    for i in tqdm(
+        subset, desc="[LAND-PAPER] MNIST geodesics", unit="sample", leave=False
+    ):
         x = X_2d[i]
         p = compute_knn_initial_paths(
             np.array(mu), x[None, :], manifold, N_points=manifold.K_segments + 1
@@ -730,19 +839,34 @@ def _run_mnist_experiment(cfg: FullPaperConfig, output_dir: Path) -> dict[str, f
 def _run_scalability_experiment(
     cfg: FullPaperConfig, output_dir: Path
 ) -> dict[str, list[float]]:
-    X_mnist = _mnist_digit_one(cfg.seed, n_samples=1200)
+    _log("Fig.14: running scalability benchmark")
+    X_mnist = _mnist_digit_one(
+        cfg.seed,
+        n_samples=cfg.scalability_samples,
+        source=cfg.mnist_source,
+    )
     dims = [2, 5, 10, 20, 30, 40, 50, 60]
     runtimes = []
     usable_dims = []
 
     rng = np.random.default_rng(cfg.seed)
-    for d in dims:
+    for d in tqdm(dims, desc="[LAND-PAPER] Scalability dims", unit="dim"):
+        if d > cfg.scalability_dim_max:
+            continue
         if d > X_mnist.shape[1]:
             continue
-        Xd = PCA(n_components=d, random_state=cfg.seed).fit_transform(X_mnist)
+        Xd = PCA(
+            n_components=d,
+            svd_solver="randomized",
+            random_state=cfg.seed,
+        ).fit_transform(X_mnist)
         Xd = Xd.astype(np.float32)
         base = Xd[0]
-        tgt_idx = rng.choice(np.arange(1, Xd.shape[0]), size=20, replace=False)
+        tgt_idx = rng.choice(
+            np.arange(1, Xd.shape[0]),
+            size=min(cfg.scalability_targets, Xd.shape[0] - 1),
+            replace=False,
+        )
         targets = Xd[tgt_idx]
 
         X_jnp = jnp.array(Xd, dtype=jnp.float32)
@@ -765,7 +889,7 @@ def _run_scalability_experiment(
     fig, ax = plt.subplots(figsize=(7, 4.5))
     ax.plot(usable_dims, runtimes, marker="o")
     ax.set_xlabel("Dimension")
-    ax.set_ylabel("Seconds (20 log-maps)")
+    ax.set_ylabel(f"Seconds ({cfg.scalability_targets} log-maps)")
     ax.set_title("Figure 14: Geodesic scalability")
     ax.grid(alpha=0.3)
     fig.tight_layout()
@@ -778,6 +902,7 @@ def _run_scalability_experiment(
 def _run_model_selection_experiment(
     cfg: FullPaperConfig, output_dir: Path
 ) -> dict[str, dict[str, list[float]]]:
+    _log("Fig.15: model selection (AIC/BIC)")
     X_t, _, _ = sample_non_linear_data(n_samples=300, return_labels=True, seed=cfg.seed)
     X = X_t.numpy()
     X_jnp = jnp.array(X, dtype=jnp.float32)
@@ -788,7 +913,11 @@ def _run_model_selection_experiment(
     }
 
     N, D = X.shape
-    for K in range(1, 5):
+    for K in tqdm(
+        range(1, cfg.model_selection_k_max + 1),
+        desc="[LAND-PAPER] Model selection K",
+        unit="K",
+    ):
         gmm = GaussianMixture(
             n_components=K, covariance_type="full", random_state=cfg.seed
         )
@@ -796,7 +925,9 @@ def _run_model_selection_experiment(
         results["AIC"]["GMM"].append(float(gmm.aic(X)))
         results["BIC"]["GMM"].append(float(gmm.bic(X)))
 
-        ls = LeastSquaresGaussianModel.fit(X, K=K, seed=cfg.seed)
+        ls = LeastSquaresGaussianModel.fit(
+            X, K=K, seed=cfg.seed, n_init=cfg.kmeans_n_init
+        )
         ll_ls = _ls_logpdf(X, ls).sum()
         p = K * D + K * D * (D + 1) / 2 + (K - 1)
         results["AIC"]["LS"].append(float(2 * p - 2 * ll_ls))
@@ -808,7 +939,7 @@ def _run_model_selection_experiment(
             rho_metric=1e-3,
             K_segments=6,
             n_neighbors=7,
-            land_S=600,
+            land_S=min(cfg.land_mc_samples, 600),
         )
         mu, sigma, C, pi = fit_land(X_jnp, K=K, cfg=e_cfg, seed=cfg.seed + K)
         manifold = RiemannianManifold(
@@ -818,7 +949,7 @@ def _run_model_selection_experiment(
         results["AIC"]["LAND"].append(float(2 * p - 2 * ll_land))
         results["BIC"]["LAND"].append(float(p * np.log(N) - 2 * ll_land))
 
-    K_vals = [1, 2, 3, 4]
+    K_vals = list(range(1, cfg.model_selection_k_max + 1))
     fig, axes = plt.subplots(1, 2, figsize=(10, 4.5))
     for model in ["LAND", "LS", "GMM"]:
         axes[0].plot(K_vals, results["AIC"][model], marker="o", label=model)
@@ -872,9 +1003,11 @@ def run_all_paper_experiments(cfg: FullPaperConfig) -> dict[str, object]:
         n_eval_samples=cfg.synthetic_eval_samples,
         k_min=cfg.synthetic_k_min,
         k_max=cfg.synthetic_k_max,
-        land_S=cfg.land_mc_samples,
+        land_S=min(cfg.land_mc_samples, 600),
         seed=cfg.seed,
         clustering_K=cfg.synthetic_clustering_k,
+        contour_grid_size=max(24, cfg.fig_grid_size - 8),
+        kmeans_n_init=cfg.kmeans_n_init,
     )
 
     result: dict[str, object] = {}
@@ -961,12 +1094,37 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=str, default="plots/land_paper_full")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--synthetic-datasets", type=int, default=1)
-    parser.add_argument("--synthetic-samples", type=int, default=300)
-    parser.add_argument("--synthetic-eval-samples", type=int, default=10_000)
+    parser.add_argument("--synthetic-samples", type=int, default=220)
+    parser.add_argument("--synthetic-eval-samples", type=int, default=2000)
     parser.add_argument("--synthetic-k-min", type=int, default=1)
-    parser.add_argument("--synthetic-k-max", type=int, default=4)
-    parser.add_argument("--synthetic-clustering-k", type=int, default=20)
-    parser.add_argument("--land-mc-samples", type=int, default=3000)
+    parser.add_argument("--synthetic-k-max", type=int, default=3)
+    parser.add_argument("--synthetic-clustering-k", type=int, default=10)
+    parser.add_argument("--land-mc-samples", type=int, default=600)
+    parser.add_argument("--kmeans-n-init", type=int, default=8)
+    parser.add_argument("--fig-grid-size", type=int, default=36)
+    parser.add_argument("--fig-geodesic-subset", type=int, default=30)
+    parser.add_argument("--fig12-k-max", type=int, default=3)
+    parser.add_argument("--eeg-subjects", type=int, default=4)
+    parser.add_argument("--eeg-land-s", type=int, default=300)
+    parser.add_argument("--eeg-nmf-starts", type=int, default=4)
+    parser.add_argument("--eeg-sigma-min", type=float, default=0.7)
+    parser.add_argument("--eeg-sigma-max", type=float, default=1.3)
+    parser.add_argument("--eeg-sigma-step", type=float, default=0.3)
+    parser.add_argument("--normalization-grid-size", type=int, default=45)
+    parser.add_argument("--normalization-mc-runs", type=int, default=4)
+    parser.add_argument("--normalization-mc-max-samples", type=int, default=1200)
+    parser.add_argument("--normalization-mc-step", type=int, default=200)
+    parser.add_argument("--mnist-samples", type=int, default=120)
+    parser.add_argument(
+        "--mnist-source", type=str, choices=["digits", "openml"], default="digits"
+    )
+    parser.add_argument("--mnist-grid-size", type=int, default=50)
+    parser.add_argument("--mnist-geodesic-subset", type=int, default=25)
+    parser.add_argument("--mnist-ls-k", type=int, default=4)
+    parser.add_argument("--scalability-samples", type=int, default=600)
+    parser.add_argument("--scalability-targets", type=int, default=10)
+    parser.add_argument("--scalability-dim-max", type=int, default=40)
+    parser.add_argument("--model-selection-k-max", type=int, default=3)
     parser.add_argument("--skip-eeg", action="store_true")
     parser.add_argument("--skip-mnist", action="store_true")
     parser.add_argument("--skip-scalability", action="store_true")
@@ -987,6 +1145,29 @@ def main() -> None:
         synthetic_k_max=args.synthetic_k_max,
         synthetic_clustering_k=args.synthetic_clustering_k,
         land_mc_samples=args.land_mc_samples,
+        kmeans_n_init=args.kmeans_n_init,
+        fig_grid_size=args.fig_grid_size,
+        fig_geodesic_subset=args.fig_geodesic_subset,
+        fig12_k_max=args.fig12_k_max,
+        eeg_subjects=args.eeg_subjects,
+        eeg_nmf_starts=args.eeg_nmf_starts,
+        eeg_land_S=args.eeg_land_s,
+        eeg_sigma_min=args.eeg_sigma_min,
+        eeg_sigma_max=args.eeg_sigma_max,
+        eeg_sigma_step=args.eeg_sigma_step,
+        normalization_grid_size=args.normalization_grid_size,
+        normalization_mc_runs=args.normalization_mc_runs,
+        normalization_mc_max_samples=args.normalization_mc_max_samples,
+        normalization_mc_step=args.normalization_mc_step,
+        mnist_samples=args.mnist_samples,
+        mnist_source=args.mnist_source,
+        mnist_grid_size=args.mnist_grid_size,
+        mnist_geodesic_subset=args.mnist_geodesic_subset,
+        mnist_ls_k=args.mnist_ls_k,
+        scalability_samples=args.scalability_samples,
+        scalability_targets=args.scalability_targets,
+        scalability_dim_max=args.scalability_dim_max,
+        model_selection_k_max=args.model_selection_k_max,
         run_eeg=not args.skip_eeg,
         run_mnist=not args.skip_mnist,
         run_scalability=not args.skip_scalability,
