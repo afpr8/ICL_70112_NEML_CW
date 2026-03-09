@@ -77,27 +77,21 @@ class LANDMixtureModel:
     ) -> tuple[list[jnp.ndarray], list[jnp.ndarray], list[jnp.ndarray], jnp.ndarray]:
         """
         Fit the LAND mixture model to the data using Expectation-Maximisation
-        Params:
-            X (jnp.ndarray): The data to fit the model to, shape (N, D)
-        Returns:
-            mu (list[jnp.ndarray]): The means of the K distributions
-            sigma (list[jnp.ndarray]): The covariances of the K distributions
-            C (list[jnp.ndarray]): The normalisation constants
-            pi (jnp.ndarray): The mixing weights
+        with component-wise loss tracking and reversion.
         """
         manifold = RiemannianManifold(
             X, self.sigma, self.rho, self.K_segments, self.n_neighbors
         )
         N = X.shape[0]
 
-        print("Initializing parameters...")
+        print("Initialising parameters...")
         self.key, subkey = jax.random.split(self.key)
         mu, A, sigma = self._init_params(
             X, key=subkey, method=self.init_method, manifold=manifold
         )
         pi = jnp.ones(self.K) / self.K
 
-        self.key, subkey = jax.random.split(self.key)
+        # Initialise normalisation constants
         C = []
         Vs = []
         for k in range(self.K):
@@ -109,9 +103,7 @@ class LANDMixtureModel:
             Vs.append(v_s)
 
         t = 0
-        loss_diff = float("inf")
-        prev_loss = float("inf")
-        current_loss = float("inf")
+        global_loss_prev = float("inf")
         n_wo_improvement = 0
 
         with tqdm(desc="Mixture Model EM", unit="epoch") as pbar:
@@ -120,9 +112,7 @@ class LANDMixtureModel:
                 log_maps_all = []
                 inv_sigmas = []
 
-                prevState = State(mu, A, sigma, pi, C, Vs)
-
-                # E-step: compute responsibilities
+                # E-STEP
                 for k in range(self.K):
                     inv_sigma = jnp.linalg.inv(sigma[k])
                     inv_sigmas.append(inv_sigma)
@@ -132,121 +122,108 @@ class LANDMixtureModel:
 
                     dist_sq = jnp.sum((log_maps @ inv_sigma) * log_maps, axis=-1)
 
-                    # Mask out points that are too far
-                    # TODO: threshold could be a hyperparameter or adapt during training
-                    # dist_sq = jnp.where(dist_sq > 0.2, 0, dist_sq)
-
                     # p_M(x_n | mu_k, Sigma_k)
                     p_x = (1.0 / C[k]) * jnp.exp(-0.5 * dist_sq)
                     r = r.at[:, k].set(pi[k] * p_x)
 
-                # Normalise responsibilities across components for each point
+                # Normalise responsibilities across components
                 r_sum = r.sum(axis=1, keepdims=True)
                 r_sum = jnp.clip(r_sum, a_min=1e-12)
                 r = r / r_sum
 
-                for k in range(self.K):
-                    N_k = r[:, k].sum()
-
-                    # Compute both gradients sharing MC samples
-                    self.key, subkey = jax.random.split(self.key)
-                    grad_mu = self._compute_grad_mu(
-                        mu[k],
-                        sigma[k],
-                        C[k],
-                        Vs[k],
-                        r[:, k],
-                        N_k,
-                        subkey,
-                        log_maps_all[k],
-                        manifold,
-                    )
-
-                    # update mu
-                    new_mu_k = manifold.exp_map(mu[k], self.lr_mu * grad_mu)
-                    mu = mu.at[k].set(new_mu_k)
-
-                    C[k] = manifold.compute_normalization_constant(
-                        mu[k], sigma[k], subkey, n_samples=self.S
-                    )[0]
-
-                # Calculate current negative log-likelihood to monitor convergence
-                current_loss = -jnp.sum(jnp.log(r_sum)) / N
-
-                loss_diff = current_loss - prev_loss
-
-                # If the loss increased, revert to previous parameters and reduce learning rate
-                if loss_diff > 0:  
-                    mu, A, sigma, pi, C, Vs = prevState.mu, prevState.A, prevState.sigma, prevState.pi, prevState.C, prevState.Vs
-                    self.lr_mu *= self.lr_scale_down
-                    loss_diff = 0.0 
+                # Track global convergence
+                global_loss_current = -jnp.sum(jnp.log(r_sum)) / N
+                if t > 0 and (global_loss_prev - global_loss_current) <= self.epsilon:
+                    n_wo_improvement += 1
                 else:
-                    self.lr_mu *= self.lr_scale_up
-
-                    # If the loss did not decrease significantly (or increased), increment counter
-                    if loss_diff <= self.epsilon:
-                        n_wo_improvement += 1
-                    else:
-                        n_wo_improvement = 0
-
-                prev_loss = current_loss
+                    n_wo_improvement = 0
+                global_loss_prev = global_loss_current
 
                 pbar.set_postfix(
-                    loss_diff=float(loss_diff),
-                    loss=float(current_loss),
+                    loss=float(global_loss_current),
                     no_impr=int(n_wo_improvement),
                 )
                 pbar.update(1)
 
-                # M-step: update parameters for each component
+                # PRE-COMPUTE CLUSTER BASELINE LOSSES
+                comp_losses = jnp.zeros(self.K)
+                for k in range(self.K):
+                    # Q-function loss: -sum( r_nk * log p(x | mu_k, Sigma_k) )
+                    dist_sq = jnp.sum((log_maps_all[k] @ inv_sigmas[k]) * log_maps_all[k], axis=-1)
+                    log_p_x = -jnp.log(C[k]) - 0.5 * dist_sq
+                    comp_losses = comp_losses.at[k].set(-jnp.sum(r[:, k] * log_p_x))
+
+                # M-STEP (Component-wise Propose & Check)
                 for k in range(self.K):
                     N_k = r[:, k].sum()
 
-                    # Compute both gradients sharing MC samples
+                    # === 1. UPDATE & CHECK MU ===
+                    self.key, subkey = jax.random.split(self.key)
+                    grad_mu = self._compute_grad_mu(
+                        mu[k], sigma[k], C[k], Vs[k], r[:, k], N_k, subkey, log_maps_all[k], manifold
+                    )
+
+                    # Propose new mu
+                    new_mu_k = manifold.exp_map(mu[k], self.lr_mu * grad_mu)
+                    new_C_k_mu, new_Vs_k_mu = manifold.compute_normalization_constant(
+                        new_mu_k, sigma[k], subkey, n_samples=self.S
+                    )
+
+                    # To check the loss, we compute the new log maps
+                    new_log_maps = self._compute_log_maps(new_mu_k, X, manifold)
+                    new_dist_sq_mu = jnp.sum((new_log_maps @ inv_sigmas[k]) * new_log_maps, axis=-1)
+                    new_log_p_x_mu = -jnp.log(new_C_k_mu) - 0.5 * new_dist_sq_mu
+                    new_loss_mu = -jnp.sum(r[:, k] * new_log_p_x_mu)
+
+                    # Accept or Reject mu
+                    if new_loss_mu > comp_losses[k]:
+                        self.lr_mu *= self.lr_scale_down
+                        current_log_maps = log_maps_all[k] # Revert: use old log maps for sigma step
+                    else:
+                        mu = mu.at[k].set(new_mu_k)
+                        C[k] = new_C_k_mu
+                        Vs[k] = new_Vs_k_mu
+                        current_log_maps = new_log_maps # Accept: pass new log maps to sigma step
+                        comp_losses = comp_losses.at[k].set(new_loss_mu)
+                        self.lr_mu *= self.lr_scale_up
+
+                    # === 2. UPDATE & CHECK SIGMA ===
                     self.key, subkey = jax.random.split(self.key)
                     grad_sigma = self._compute_grad_sigma(
-                        mu[k],
-                        A[k],
-                        sigma[k],
-                        C[k],
-                        Vs[k],
-                        r[:, k],
-                        N_k,
-                        subkey,
-                        log_maps_all[k],
-                        manifold,
+                        mu[k], A[k], sigma[k], C[k], Vs[k], r[:, k], N_k, subkey, current_log_maps, manifold
                     )
 
-                    
-                    # update A
+                    # Propose new sigma
                     new_A_k = A[k] - (self.lr_A * grad_sigma)
-                    A = A.at[k].set(new_A_k)
-
-                    # update Sigma
                     new_sigma_k = jnp.linalg.inv(new_A_k.T @ new_A_k)
-                    sigma = sigma.at[k].set(new_sigma_k)
-
-                    # update pi
-                    pi = pi.at[k].set(N_k / N)
-
-                    # Update normalization constant
-                    self.key, subkey = jax.random.split(self.key)
-                    c_val, v_s = manifold.compute_normalization_constant(
-                        new_mu_k, new_sigma_k, subkey, n_samples=self.S
+                    new_C_k_sig, new_Vs_k_sig = manifold.compute_normalization_constant(
+                        mu[k], new_sigma_k, subkey, n_samples=self.S
                     )
-                    C[k] = c_val
-                    Vs[k] = v_s
 
-                if loss_diff > 0:  
-                    mu, A, sigma, pi, C, Vs = prevState.mu, prevState.A, prevState.sigma, prevState.pi, prevState.C, prevState.Vs
-                    self.lr_A *= self.lr_scale_down
-                    loss_diff = 0.0 
-                else:
-                    self.lr_A *= self.lr_scale_up
+                    # Check the loss (we can reuse current_log_maps here)
+                    inv_new_sigma_k = jnp.linalg.inv(new_sigma_k)
+                    new_dist_sq_sig = jnp.sum((current_log_maps @ inv_new_sigma_k) * current_log_maps, axis=-1)
+                    new_log_p_x_sig = -jnp.log(new_C_k_sig) - 0.5 * new_dist_sq_sig
+                    new_loss_sigma = -jnp.sum(r[:, k] * new_log_p_x_sig)
+
+                    # Accept or Reject sigma
+                    if new_loss_sigma > comp_losses[k]:
+                        self.lr_A *= self.lr_scale_down
+                    else:
+                        A = A.at[k].set(new_A_k)
+                        sigma = sigma.at[k].set(new_sigma_k)
+                        C[k] = new_C_k_sig
+                        Vs[k] = new_Vs_k_sig
+                        comp_losses = comp_losses.at[k].set(new_loss_sigma)
+                        self.lr_A *= self.lr_scale_up
+
+                    # Update mixing weights
+                    pi = pi.at[k].set(N_k / N)
 
                 t += 1
 
         return mu, sigma, C, pi
+
 
     def _compute_log_maps(
         self, mu: jnp.ndarray, X: jnp.ndarray, manifold: RiemannianManifold
