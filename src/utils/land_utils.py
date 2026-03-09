@@ -142,7 +142,7 @@ class RiemannianManifold:
         sigma: float = 1.0,
         rho: float = 1e-3,
         K_segments: int = 5,
-        n_neighbors: int = 5,
+        n_neighbors: int = 6,
     ) -> None:
         """
         Initializes the Riemannian manifold.
