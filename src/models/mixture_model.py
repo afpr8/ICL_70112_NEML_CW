@@ -1,3 +1,5 @@
+import functools
+
 import jax
 import jax.numpy as jnp
 from sklearn.mixture import GaussianMixture
@@ -5,6 +7,16 @@ from tqdm import tqdm
 import numpy as np
 
 from src.utils.land_utils import RiemannianManifold, compute_knn_initial_paths
+from dataclasses import dataclass
+
+@dataclass
+class State:
+    mu: list[jnp.ndarray]
+    A: list[jnp.ndarray]
+    sigma: list[jnp.ndarray]
+    pi: jnp.ndarray
+    C: list[jnp.ndarray]
+    Vs: list[jnp.ndarray]
 
 
 class LANDMixtureModel:
@@ -14,6 +26,8 @@ class LANDMixtureModel:
         lr_mu: float = 1e-3,
         lr_A: float = 1e-3,
         S: int = 100,
+        lr_scale_down: float = 0.75,  # 0.75 as in the original LAND paper
+        lr_scale_up: float = 1.1,  # 1.1 as in the original LAND paper
         epsilon: float = 1e-3,
         patience: int = 2,
         sigma: float = 1.0,
@@ -50,6 +64,9 @@ class LANDMixtureModel:
         self.K_segments = K_segments
         self.n_neighbors = n_neighbors
 
+        self.lr_scale_up = lr_scale_up
+        self.lr_scale_down = lr_scale_down
+
         self.init_method = init_method
         self.key = jax.random.key(seed)
 
@@ -77,14 +94,17 @@ class LANDMixtureModel:
         )
         pi = jnp.ones(self.K) / self.K
 
-        self.key, subkey = jax.random.split(self.key)
-        C_stacked, v_samples = manifold.compute_mixture_normalization(
-            mu, sigma, subkey, n_samples=self.S
-        )
-        # Convert the resulting JAX array back to a list of arrays
-        C = list(C_stacked)
-        Vs = list(v_samples)
-
+        C = []
+        Vs = []
+        for k in range(self.K):
+            self.key, subkey = jax.random.split(self.key)
+            c_val, v_s = manifold.compute_normalization_constant(
+                mu[k], sigma[k], subkey, n_samples=self.S
+            )
+            C.append(c_val)
+            Vs.append(v_s)
+        
+        
         t = 0
         loss_diff = float("inf")
         prev_loss = float("inf")
@@ -96,6 +116,8 @@ class LANDMixtureModel:
                 r = jnp.zeros((N, self.K))
                 log_maps_all = []
                 inv_sigmas = []
+
+                prevState = State(mu, A, sigma, pi, C, Vs)
 
                 # E-step: compute responsibilities
                 for k in range(self.K):
@@ -119,11 +141,17 @@ class LANDMixtureModel:
                 # Calculate current negative log-likelihood to monitor convergence
                 current_loss = -jnp.sum(jnp.log(r_sum)) / N
 
-                if t > 0:
-                    loss_diff = current_loss - prev_loss
+                loss_diff = current_loss - prev_loss
+
+                if loss_diff > 0 and t > 0:
+                    # Revert to previous values
+                    mu, A, sigma, pi, C, Vs = prevState.mu, prevState.A, prevState.sigma, prevState.pi, prevState.C, prevState.Vs
+                    self.lr_mu *= self.lr_scale_down
+                else:
+                    self.lr_mu *= self.lr_scale_up
 
                     # If the loss did not decrease significantly (or increased), increment counter
-                    if abs(loss_diff) <= self.epsilon or loss_diff > 0:
+                    if loss_diff <= self.epsilon:
                         n_wo_improvement += 1
                     else:
                         n_wo_improvement = 0
@@ -172,14 +200,14 @@ class LANDMixtureModel:
                     pi = pi.at[k].set(N_k / N)
 
                     C = []
-                    v_samples_all = []
+                    Vs = []
                     for k in range(self.K):
                         self.key, subkey = jax.random.split(self.key)
                         c_val, v_s = manifold.compute_normalization_constant(
                             mu[k], sigma[k], subkey, n_samples=self.S
                         )
                         C.append(c_val)
-                        v_samples_all.append(v_s)
+                        Vs.append(v_s)
                 t += 1
 
         return mu, sigma, C, pi
