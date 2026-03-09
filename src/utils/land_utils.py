@@ -17,12 +17,9 @@ def compute_knn_initial_path(
     X: Union[np.ndarray, jax.Array],
     manifold: "RiemannianManifold",
     N_points: int = 20,
-    n_neighbors: int = 5,
 ) -> np.ndarray:
-    # Shortest path through data manifold using k-NN graph
-    paths = compute_knn_initial_paths(
-        x, np.vstack([y[None, :], X]), manifold, N_points, n_neighbors
-    )
+    # Shortest path between x and y through data manifold using k-NN graph
+    paths = compute_knn_initial_paths(x, np.vstack([y[None, :], X]), manifold, N_points)
     return paths[0]
 
 

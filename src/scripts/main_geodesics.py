@@ -20,7 +20,7 @@ def main():
     parser.add_argument("--rho", type=float, default=1e-3, help="Rho parameter")
     parser.add_argument("--K_segments", type=int, default=10, help="Number of segments")
     parser.add_argument(
-        "--n-neighbors", type=int, default=5, help="Number of neighbors for KNN graph"
+        "--n_neighbors", type=int, default=5, help="Number of neighbors for KNN graph"
     )
     args = parser.parse_args()
 
@@ -61,7 +61,7 @@ def main():
     # We compute paths for all points in X_np at once for efficiency, then filter for targets
     # This ensures that X_np is used as the node pool for the shortest path search.
     all_paths = compute_knn_initial_paths(
-        x_base, X_np, manifold, N_points=K_segments + 1, n_neighbors=args.n_neighbors
+        x_base, X_np, manifold, N_points=K_segments + 1
     )
     paths_np = all_paths[target_indices]
     paths_jnp = jnp.array(paths_np, dtype=jnp.float32)
