@@ -1,16 +1,18 @@
-import functools
-
 import jax
 import jax.numpy as jnp
 from sklearn.mixture import GaussianMixture
 from tqdm import tqdm
 import numpy as np
+from dataclasses import dataclass
+
 
 from src.utils.land_utils import RiemannianManifold, compute_knn_initial_paths
-from dataclasses import dataclass
 
 @dataclass
 class State:
+    """
+    A dataclass to hold the state of the model parameters for potential reversion during training.
+    """
     mu: list[jnp.ndarray]
     A: list[jnp.ndarray]
     sigma: list[jnp.ndarray]

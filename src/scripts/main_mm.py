@@ -67,7 +67,7 @@ def evaluate_land_density(
 
     # Filter out empty space using the manifold's KNN tree
     distances = manifold.nn_tree.kneighbors(grid_points, 1, return_distance=True)[0]
-    threshold = 3.0 * manifold.sigma
+    threshold = 1.0 * manifold.sigma
     valid_mask = distances.flatten() < threshold
 
     valid_grid_points = grid_points[valid_mask]
@@ -110,9 +110,10 @@ def main() -> None:
     X_tensor = jnp.array(X_np, dtype=jnp.float32)
 
     # Define hyperparams matching the LAND setup
-    sigma, rho = 0.15, 1e-3
+    sigma, rho = 0.3, 1e-3
     K_segments = 10
-    
+    init_method = "GMM"
+
     # Instantiate the shared manifold structure
     manifold = RiemannianManifold(X_tensor, sigma, rho, K_segments)
 
@@ -125,7 +126,7 @@ def main() -> None:
     # 3. Fit LAND Mixture Model
     print("Fitting LAND Mixture Model...")
     land = LANDMixtureModel(
-        K=2, lr_mu=1e-2, lr_A=1e-2, S=3000, epsilon=1e-3, sigma=sigma, rho=rho, K_segments=K_segments
+        K=2, lr_mu=1e-2, lr_A=1e-2, S=3000, epsilon=1e-3, sigma=sigma, rho=rho, K_segments=K_segments, init_method=init_method
     )
     land_mu, land_sigma, land_C, land_pi = land.fit(X_tensor)
 
@@ -198,7 +199,8 @@ def main() -> None:
         X_grid=xx, 
         Y_grid=yy, 
         Z_land=Z_land, 
-        Z_gmm=Z_gmm
+        Z_gmm=Z_gmm,
+        init_method=init_method
     )
     
     # Save systematically just like the LANDMLE script
