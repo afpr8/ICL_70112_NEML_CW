@@ -144,6 +144,16 @@ class RiemannianManifold:
         K_segments: int = 5,
         n_neighbors: int = 5,
     ) -> None:
+        """
+        Initializes the Riemannian manifold.
+
+        Args:
+            X_data: The data points on which to compute the manifold.
+            sigma: The standard deviation of the Gaussian kernel used for the metric.
+            rho: The regularization parameter for the metric.
+            K_segments: The number of segments to use when computing the log maps.
+            n_neighbors: The number of neighbors to use when computing the Riemannian graph.
+        """
         self.X_data, self.sigma, self.rho, self.K_segments, self.n_neighbors = (
             X_data,
             sigma,
@@ -188,6 +198,9 @@ class RiemannianManifold:
         )
 
     def tree_flatten(self) -> Tuple[Tuple[jax.Array], Dict[str, Any]]:
+        """
+        JAX tree flattening. Required for JAX pytree registration.
+        """
         return (
             (self.X_data,),
             {
@@ -202,20 +215,63 @@ class RiemannianManifold:
     def tree_unflatten(
         cls, aux_data: Dict[str, Any], children: Tuple[jax.Array]
     ) -> "RiemannianManifold":
+        """
+        JAX tree unflattening. Required for JAX pytree registration.
+        """
         return cls(*children, **aux_data)
 
     def metric_diag(self, x: jax.Array) -> jax.Array:
+        """
+        Computes the metric diagonal for a given point x.
+
+        Args:
+            x: The point for which to compute the metric diagonal.
+
+        Returns:
+            jax.Array: The metric diagonal for the point x.
+        """
         diff = self.X_data - x[None, :]
         weights = jnp.exp(-jnp.sum(diff**2, axis=-1) / (2.0 * self.sigma**2))
         return 1.0 / (jnp.sum(weights[:, None] * diff**2, axis=0) + self.rho)
 
     def metric(self, x: jax.Array) -> jax.Array:
+        """
+        Computes the metric for a given point x.
+
+        Args:
+            x: The point for which to compute the metric.
+
+        Returns:
+            jax.Array: The metric for the point x.
+        """
         return jnp.diag(self.metric_diag(x))
 
     def _local_speed(self, x: jax.Array, v: jax.Array) -> jax.Array:
+        """
+        Computes the local magnitude (speed) of a vector v
+        at point x using the Riemannian metric.
+
+        Args:
+            x: The point for which to compute the local speed.
+            v: The tangent vector at point x.
+
+        Returns:
+            jax.Array: The magnitude of vector v.
+        """
         return jnp.sqrt(jnp.sum(self.metric_diag(x) * v**2))
 
     def curve_length(self, x: jax.Array, v: jax.Array, n_steps: int = 50) -> jax.Array:
+        """
+        Computes the length of a geodesic.
+
+        Args:
+            x: The initial point of the geodesic.
+            v: The initial velocity of the geodesic.
+            n_steps: The number of steps to use for the quadrature.
+
+        Returns:
+            jax.Array: The length of the geodesic.
+        """
         # Quadrature-based Riemannian length of a geodesic
         ts = jnp.linspace(0.0, 1.0, n_steps)
         sol = diffrax.diffeqsolve(
@@ -234,16 +290,48 @@ class RiemannianManifold:
         )
 
     def _geodesic_ode(self, x: jax.Array, v: jax.Array) -> jax.Array:
+        """
+        Evaluates the geodesic differential equation to find
+        the acceleration at point x with velocity v.
+
+        Args:
+            x: The point for which to compute the geodesic acceleration.
+            v: The velocity at point x.
+
+        Returns:
+            jax.Array: The acceleration at point x with velocity v.
+        """
         M_inv = jnp.linalg.inv(self.metric(x))
         grad_L = jax.grad(lambda p: 0.5 * jnp.dot(v, jnp.dot(self.metric(p), v)))(x)
         dot_M_v = jax.jacfwd(lambda p: jnp.dot(self.metric(p), v))(x) @ v
         return M_inv @ (grad_L - dot_M_v)
 
     def _vector_field(self, t: float, y: jax.Array, args: Any) -> jax.Array:
+        """
+        Defines the vector field for the ODE solver to integrate geodesics.
+
+        Args:
+            t: The time parameter (it is not used but required by diffrax).
+            y: The state vector, in this case the position and velocity.
+            args: Additional arguments.
+
+        Returns:
+            jax.Array: The vector field at time t and state y.
+        """
         d = y.shape[0] // 2
         return jnp.concatenate([y[d:], self._geodesic_ode(y[:d], y[d:])])
 
     def exp_map(self, x: jax.Array, v: jax.Array) -> jax.Array:
+        """
+        Computes the exponential map Exp_x(v).
+
+        Args:
+            x: The point for which to compute the exponential map.
+            v: The velocity at point x.
+
+        Returns:
+            jax.Array: The exponential map at point x with velocity v.
+        """
         sol = diffrax.diffeqsolve(
             diffrax.ODETerm(self._vector_field),
             diffrax.Tsit5(),
@@ -264,6 +352,19 @@ class RiemannianManifold:
         initial_path: jax.Array,
         scaled: bool = True,
     ) -> jax.Array:
+        """
+        Computes the log map Log_x(y) using a shooting method in which we
+        partition the path into segments and solve the ODE for each segment.
+
+        Args:
+            x: The initial point of the geodesic.
+            y: The final point of the geodesic.
+            initial_path: The initial path to use for the shooting.
+            scaled: Whether to scale the solution to fit Euclidean space.
+
+        Returns:
+            jax.Array: The velocity at point x to reach point y.
+        """
         D, K = x.shape[0], self.K_segments
         dt = 1.0 / K
         y0 = jnp.concatenate(
@@ -321,6 +422,18 @@ class RiemannianManifold:
         initial_paths: jax.Array,
         scaled: bool = True,
     ) -> jax.Array:
+        """
+        Batched computation of the log map.
+
+        Args:
+            mu: The initial point of the geodesics.
+            X_targets: The final points of the geodesics.
+            initial_paths: The initial paths to use for the shooting.
+            scaled: Whether to scale the solution to fit Euclidean space.
+
+        Returns:
+            jax.Array: The log map for the batch of points.
+        """
         return jax.vmap(self.log_map_shooting, in_axes=(None, 0, 0, None))(
             mu, X_targets, initial_paths, scaled
         )
@@ -332,6 +445,19 @@ class RiemannianManifold:
         key: jax.Array,
         n_samples: int = 3000,
     ) -> Tuple[jax.Array, jax.Array]:
+        """
+        Estimates the normalization constant for a distribution
+        on the manifold using Monte Carlo integration.
+
+        Args:
+            mu: The mean of the distribution.
+            sigma: The covariance matrix of the distribution.
+            key: The random key for the Monte Carlo integration.
+            n_samples: The number of samples to use for the Monte Carlo integration.
+
+        Returns:
+            jax.Array, jax.Array: The estimated normalization constant and the samples.
+        """
         d = mu.shape[0]
         v_samples = jax.random.multivariate_normal(
             key, jnp.zeros(d), sigma, (n_samples,)

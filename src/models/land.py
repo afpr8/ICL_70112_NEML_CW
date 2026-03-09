@@ -45,7 +45,7 @@ class LANDMLE:
             epsilon (float): The tolerance for the end condition
             sigma (float): Hyperparameter to compute the metric
             rho (float): Hyperparameter to compute the metric
-            K_segments (int): The number of segments to use for the initial path
+            K_segments (int): The number of segments to use for the approximation of the log maps
             init_method (str): The method to use for initialization.
                 - "random": Initialize mu randomly, sigma from empirical cov of tangent vectors.
                 - "mean": Initialize mu as the empirical mean, sigma from empirical cov of tangent vectors.
@@ -193,7 +193,8 @@ class LANDMLE:
     ) -> jnp.ndarray:
         m_np = np.array(mu)
         X_np = np.array(X)
-        # Batch compute initial paths using Riemannian weights to avoid gaps in topology
+        # We find the minimum distance path through the graph formed by the manifold
+        # points and then interpolate k_segments on it to use as the initial path
         paths = compute_knn_initial_paths(
             m_np, X_np, manifold, N_points=self.K_segments + 1
         )
