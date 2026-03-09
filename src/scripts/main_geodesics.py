@@ -72,9 +72,8 @@ def main():
     print(f"Time taken for KNN paths: {t1 - t0} seconds")
 
     # 5. Compute initial velocities in batch using multiple shooting log map
-    # log_map_batch signature: (mu, X_targets, initial_paths)
     t0 = time.time()
-    v_opts = manifold.log_map_batch(x_base_jnp, X_targets_jnp, paths_jnp)
+    v_opts = manifold.log_map_batch(x_base_jnp, X_targets_jnp, paths_jnp, scaled=False)
     t1 = time.time()
     print(f"Time taken for log maps: {t1 - t0} seconds")
 
