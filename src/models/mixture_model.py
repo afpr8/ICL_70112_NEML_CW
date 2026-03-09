@@ -179,7 +179,7 @@ class LANDMixtureModel:
 
                     # Accept or Reject mu
                     if new_loss_mu > k_losses[k]:
-                        self.lr_mu[k] *= self.lr_scale_down
+                        self.lr_mu = self.lr_mu.at[k].set(self.lr_mu[k] * self.lr_scale_down)
                         current_log_maps = log_maps_all[k] # Revert: use old log maps for sigma step
                     else:
                         mu = mu.at[k].set(new_mu_k)
@@ -187,7 +187,7 @@ class LANDMixtureModel:
                         Vs[k] = new_Vs_k_mu
                         current_log_maps = new_log_maps # Accept: pass new log maps to sigma step
                         k_losses = k_losses.at[k].set(new_loss_mu)
-                        self.lr_mu[k] *= self.lr_scale_up
+                        self.lr_mu = self.lr_mu.at[k].set(self.lr_mu[k] * self.lr_scale_up)
 
                     # compute grad sigma
                     self.key, subkey = jax.random.split(self.key)
@@ -210,14 +210,14 @@ class LANDMixtureModel:
 
                     # Accept or reject sigma
                     if new_loss_sigma > k_losses[k]:
-                        self.lr_A[k] *= self.lr_scale_down
+                        self.lr_A = self.lr_A.at[k].set(self.lr_A[k] * self.lr_scale_down)
                     else:
                         A = A.at[k].set(new_A_k)
                         sigma = sigma.at[k].set(new_sigma_k)
                         C[k] = new_C_k_sig
                         Vs[k] = new_Vs_k_sig
                         k_losses = k_losses.at[k].set(new_loss_sigma)
-                        self.lr_A[k] *= self.lr_scale_up
+                        self.lr_A = self.lr_A.at[k].set(self.lr_A[k] * self.lr_scale_up)
 
                     # Update mixing weights
                     pi = pi.at[k].set(N_k / N)
