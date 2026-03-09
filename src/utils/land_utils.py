@@ -332,13 +332,21 @@ class RiemannianManifold:
         Returns:
             jax.Array: The exponential map at point x with velocity v.
         """
+        # Reverse scaling hack
+        required_length = jnp.linalg.norm(v)
+        M_x = self.metric(x)
+        riemann_len = jnp.sqrt(jnp.dot(v, jnp.dot(M_x, v)))
+
+        scale = jnp.where(riemann_len > 1e-8, required_length / riemann_len, 0.0)
+        v_true = v * scale
+
         sol = diffrax.diffeqsolve(
             diffrax.ODETerm(self._vector_field),
             diffrax.Tsit5(),
             t0=0.0,
             t1=1.0,
             dt0=0.1,
-            y0=jnp.concatenate([x, v]),
+            y0=jnp.concatenate([x, v_true]),
             saveat=diffrax.SaveAt(t1=True),
             stepsize_controller=diffrax.PIDController(1e-2, 1e-2),
             adjoint=diffrax.DirectAdjoint(),
