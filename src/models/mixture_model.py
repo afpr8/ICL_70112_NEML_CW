@@ -78,7 +78,7 @@ class LANDMixtureModel:
         pi = jnp.ones(self.K) / self.K
 
         self.key, subkey = jax.random.split(self.key)
-        C_stacked, _ = manifold.compute_mixture_normalization(
+        C_stacked, v_samples = manifold.compute_mixture_normalization(
             mu, sigma, subkey, n_samples=self.S
         )
         # Convert the resulting JAX array back to a list of arrays
@@ -117,22 +117,22 @@ class LANDMixtureModel:
 
                 # Calculate current negative log-likelihood to monitor convergence
                 current_loss = -jnp.sum(jnp.log(r_sum)) / N
-                
+
                 if t > 0:
                     loss_diff = current_loss - prev_loss
-                    
+
                     # If the loss did not decrease significantly (or increased), increment counter
                     if abs(loss_diff) <= self.epsilon or loss_diff > 0:
                         n_wo_improvement += 1
                     else:
                         n_wo_improvement = 0
-                        
+
                 prev_loss = current_loss
 
                 pbar.set_postfix(
-                    loss_diff=float(loss_diff), 
+                    loss_diff=float(loss_diff),
                     loss=float(current_loss),
-                    no_impr=int(n_wo_improvement)
+                    no_impr=int(n_wo_improvement),
                 )
                 pbar.update(1)
 
@@ -147,6 +147,7 @@ class LANDMixtureModel:
                         A[k],
                         sigma[k],
                         C[k],
+                        v_samples,
                         r[:, k],
                         N_k,
                         subkey,
@@ -172,11 +173,11 @@ class LANDMixtureModel:
                 # --- OUTSIDE THE LOOP ---
                 # Estimate C for all K components simultaneously using the updated mu and sigma
                 self.key, subkey = jax.random.split(self.key)
-                C_stacked, _ = manifold.compute_mixture_normalization(
+                C_stacked, v_samples = manifold.compute_mixture_normalization(
                     mu, sigma, subkey, n_samples=self.S
                 )
                 C = list(C_stacked)
-                
+
                 t += 1
 
         return mu, sigma, C, pi
@@ -193,7 +194,7 @@ class LANDMixtureModel:
 
     def _init_params(
         self, X: jnp.ndarray, key: jax.Array, method: str, manifold: RiemannianManifold
-    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]: 
+    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
         """
         Initialise the parameters of the mixture model.
         Params:
@@ -260,6 +261,7 @@ class LANDMixtureModel:
         A: jnp.ndarray,
         sigma: jnp.ndarray,
         normalization_constant: jnp.ndarray,
+        v_samples: jnp.ndarray,
         r_k: jnp.ndarray,
         N_k: jnp.ndarray,
         key: jax.Array,
@@ -274,6 +276,7 @@ class LANDMixtureModel:
             A (jnp.ndarray): Local component precision factor (A.T @ A = inv(sigma))
             sigma (jnp.ndarray): Local component covariance
             normalization_constant (jnp.ndarray): Normalisation term evaluated at mu, sigma
+            v_samples (jnp.ndarray): Samples used for the computation of the normalization constant
             r_k (jnp.ndarray): Responsibility of this component for each point
             N_k (jnp.ndarray): Sum of responsibilities for this component
             key (jax.Array): Random generation key
@@ -289,9 +292,6 @@ class LANDMixtureModel:
 
         # MC estimate of normalisation integral
         d = mu.shape[0]
-        v_samples = jax.random.multivariate_normal(
-            key, jnp.zeros(d), sigma, shape=(self.S,)
-        )
         mc_scale = jnp.sqrt((2 * jnp.pi) ** d * jnp.linalg.det(sigma)) / (
             self.S * normalization_constant
         )
