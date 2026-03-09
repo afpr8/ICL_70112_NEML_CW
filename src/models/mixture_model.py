@@ -29,7 +29,7 @@ class LANDMixtureModel:
         lr_scale_down: float = 0.75,  # 0.75 as in the original LAND paper
         lr_scale_up: float = 1.1,  # 1.1 as in the original LAND paper
         epsilon: float = 1e-3,
-        patience: int = 2,
+        patience: int = 10,
         sigma: float = 1.0,
         rho: float = 1e-3,
         K_segments: int = 5,
@@ -143,12 +143,12 @@ class LANDMixtureModel:
 
                 loss_diff = current_loss - prev_loss
 
-                if loss_diff > 0 and t > 0:
-                    # Revert to previous values
+                # If the loss increased, revert to previous parameters and reduce learning rate
+                if loss_diff > 0:  
                     mu, A, sigma, pi, C, Vs = prevState.mu, prevState.A, prevState.sigma, prevState.pi, prevState.C, prevState.Vs
-                    self.lr_mu *= self.lr_scale_down
+                    self.lr_A *= self.lr_scale_down
                 else:
-                    self.lr_mu *= self.lr_scale_up
+                    self.lr_A *= self.lr_scale_up
 
                     # If the loss did not decrease significantly (or increased), increment counter
                     if loss_diff <= self.epsilon:
