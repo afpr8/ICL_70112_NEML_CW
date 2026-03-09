@@ -170,14 +170,15 @@ class LANDMixtureModel:
                     # update pi
                     pi = pi.at[k].set(N_k / N)
 
-                # --- OUTSIDE THE LOOP ---
-                # Estimate C for all K components simultaneously using the updated mu and sigma
-                self.key, subkey = jax.random.split(self.key)
-                C_stacked, v_samples = manifold.compute_mixture_normalization(
-                    mu, sigma, subkey, n_samples=self.S
-                )
-                C = list(C_stacked)
-
+                    C = []
+                    v_samples_all = []
+                    for k in range(self.K):
+                        self.key, subkey = jax.random.split(self.key)
+                        c_val, v_s = manifold.compute_normalization_constant(
+                            mu[k], sigma[k], subkey, n_samples=self.S
+                        )
+                        C.append(c_val)
+                        v_samples_all.append(v_s)
                 t += 1
 
         return mu, sigma, C, pi
@@ -223,13 +224,12 @@ class LANDMixtureModel:
             )
 
             gmm.fit(np.array(X))
-            mu = [jnp.array(m, dtype=jnp.float32) for m in gmm.means_]
-
-            # Find the data point closest to the euclidean means to ensure we start on the manifold
-            closest_idxs = [
-                jnp.argmin(jnp.sum((X - mu[k]) ** 2, axis=1)) for k in range(self.K)
-            ]
-            mu = [X[idx].squeeze() for idx in closest_idxs]
+            mu = []
+            for m in gmm.means_:
+                m_tensor = jnp.array(m, dtype=jnp.float32)
+                # Find the data point closest to this specific GMM mean
+                closest_idx = jnp.argmin(jnp.sum((X - m_tensor) ** 2, axis=1))
+                mu.append(X[closest_idx])
 
         elif method == "mean":
             sorted_data = jnp.sort(X, axis=0)
