@@ -112,6 +112,7 @@ class LANDMixtureModel:
                 log_maps_all = []
                 inv_sigmas = []
 
+                dist_sq_all = []
                 # E-STEP
                 for k in range(self.K):
                     inv_sigma = jnp.linalg.inv(sigma[k])
@@ -125,6 +126,8 @@ class LANDMixtureModel:
                     # p_M(x_n | mu_k, Sigma_k)
                     p_x = (1.0 / C[k]) * jnp.exp(-0.5 * dist_sq)
                     r = r.at[:, k].set(pi[k] * p_x)
+                    
+                    dist_sq_all.append(dist_sq)
 
                 # Normalise responsibilities across components
                 r_sum = r.sum(axis=1, keepdims=True)
@@ -144,8 +147,7 @@ class LANDMixtureModel:
                 k_losses = jnp.zeros(self.K)
                 for k in range(self.K):
                     # Q-function loss: -sum( r_nk * log p(x | mu_k, Sigma_k) )
-                    dist_sq = jnp.sum((log_maps_all[k] @ inv_sigmas[k]) * log_maps_all[k], axis=-1)
-                    log_p_x = -jnp.log(C[k]) - 0.5 * dist_sq
+                    log_p_x = -jnp.log(C[k]) - 0.5 * dist_sq_all[k]
                     k_losses = k_losses.at[k].set(-jnp.sum(r[:, k] * log_p_x))
 
                 pbar.set_postfix(
@@ -197,13 +199,15 @@ class LANDMixtureModel:
 
                     # Propose new sigma
                     new_A_k = A[k] - (self.lr_A[k] * grad_sigma)
-                    new_sigma_k = jnp.linalg.inv(new_A_k.T @ new_A_k)
+                    inv_new_sigma_k = new_A_k.T @ new_A_k
+                    new_sigma_k = jnp.linalg.inv(inv_new_sigma_k)
                     new_C_k_sig, new_Vs_k_sig = manifold.compute_normalization_constant(
                         mu[k], new_sigma_k, subkey, n_samples=self.S
                     )
 
                     # Check the loss (we can reuse current_log_maps here because only depends on mu)
-                    inv_new_sigma_k = jnp.linalg.inv(new_sigma_k)
+                    
+                    
                     new_dist_sq_sig = jnp.sum((current_log_maps @ inv_new_sigma_k) * current_log_maps, axis=-1)
                     new_log_p_x_sig = -jnp.log(new_C_k_sig) - 0.5 * new_dist_sq_sig
                     new_loss_sigma = -jnp.sum(r[:, k] * new_log_p_x_sig)

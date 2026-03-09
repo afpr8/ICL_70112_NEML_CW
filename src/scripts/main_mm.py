@@ -67,7 +67,7 @@ def evaluate_land_density(
 
     # Filter out empty space using the manifold's KNN tree
     distances = manifold.nn_tree.kneighbors(grid_points, 1, return_distance=True)[0]
-    threshold = 0.25 * manifold.sigma
+    threshold = 0.5 * manifold.sigma
     valid_mask = distances.flatten() < threshold
 
     valid_grid_points = grid_points[valid_mask]
@@ -175,8 +175,8 @@ def main() -> None:
     x_min, x_max = X_np[:, 0].min() - 0.5, X_np[:, 0].max() + 0.5
     y_min, y_max = X_np[:, 1].min() - 0.5, X_np[:, 1].max() + 0.5
     xx, yy = np.meshgrid(
-        np.linspace(x_min, x_max, 10), 
-        np.linspace(y_min, y_max, 10)
+        np.linspace(x_min, x_max, 15), 
+        np.linspace(y_min, y_max, 15)
     ) 
     
     # GMM Contours
