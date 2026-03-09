@@ -76,7 +76,7 @@ def main():
     t0 = time.time()
     v_opts = manifold.log_map_batch(x_base_jnp, X_targets_jnp, paths_jnp)
     t1 = time.time()
-    print(f"Time taken for log maps: fucking {t1 - t0} seconds")
+    print(f"Time taken for log maps: {t1 - t0} seconds")
 
     # 6. Generate the continuous geodesics by integrating along the optimized velocities
     geodesics = []
