@@ -345,7 +345,7 @@ class LANDMLE:
         def exp_outer(v):
             translated_point = manifold.exp_map(mu, v)
             M_trans = manifold.metric(translated_point)
-            m_val = jnp.sqrt(jnp.linalg.det(M_trans))
+            m_val = jnp.exp(0.5 * jnp.sum(jnp.log(jnp.diag(M_trans))))
             return m_val * jnp.outer(v, v)
 
         grad_sigma_exp_map = -mc_scale * jnp.sum(jax.vmap(exp_outer)(v_samples), axis=0)
