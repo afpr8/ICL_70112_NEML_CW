@@ -148,7 +148,7 @@ def compute_log_spectrum(
         signal,
         fs=fs,
         nperseg=nperseg,
-        noverlap=nperseg // 5 # Hardcoding 50% overlap to match LAND paper
+        noverlap=nperseg // 2,  # Hardcoding 50% overlap to match LAND paper
     )
 
     return np.log1p(np.abs(Zxx)).flatten()
@@ -189,8 +189,8 @@ def extract_subject_features(
             feature_list.append(features)
             labels.append(label)
             subject_list.append(subject_id)
-        
-        return feature_list, labels, subject_id
+
+    return feature_list, labels, subject_list
 
 
 def apply_nmf(
@@ -220,16 +220,15 @@ def apply_nmf(
             random_state=rng.integers(0, 1_000_000),
             max_iter=max_iter
         )
-    coefficients = nmf.fit_transform(X)
-    components = nmf.components_
-    reconstruction_error = np.linalg.norm(
-        X - coefficients @ components,
-        ord='fro'
-    ) # Frobenius norm
+        coefficients = nmf.fit_transform(X)
+        components = nmf.components_
+        reconstruction_error = np.linalg.norm(
+            X - coefficients @ components, ord="fro"
+        )  # Frobenius norm
 
-    if reconstruction_error < best_error:
-        best_error = reconstruction_error
-        best_coefficients = coefficients
+        if reconstruction_error < best_error:
+            best_error = reconstruction_error
+            best_coefficients = coefficients
 
     return best_coefficients
 
@@ -249,7 +248,7 @@ def build_land_sleep_features(
                 Entries are one of {REM, awake, non-REM}
             subject_id_list: The subject_id for the corresponding feature data
     """
-    subjects = select_subjects(n_subjects, random_state)
+    subjects = select_subjects(n_subjects=n_subjects, random_state=random_state)
 
     features = []
     labels = []
