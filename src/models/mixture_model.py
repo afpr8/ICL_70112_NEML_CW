@@ -132,7 +132,8 @@ class LANDMixtureModel:
                     dist_sq = jnp.sum((log_maps @ inv_sigma) * log_maps, axis=-1)
 
                     # Mask out points that are too far
-                    dist_sq = jnp.where(dist_sq > 0.3, 0, dist_sq)
+                    # TODO: threshold could be a hyperparameter or adapt during training
+                    dist_sq = jnp.where(dist_sq > 0.2, 0, dist_sq)
 
                     # p_M(x_n | mu_k, Sigma_k)
                     p_x = (1.0 / C[k]) * jnp.exp(-0.5 * dist_sq)
