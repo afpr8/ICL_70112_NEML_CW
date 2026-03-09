@@ -110,7 +110,7 @@ def main() -> None:
     X_tensor = jnp.array(X_np, dtype=jnp.float32)
 
     # Define hyperparams matching the LAND setup
-    sigma, rho = 0.3, 1e-3
+    sigma, rho = 0.2, 1e-3
     K_segments = 10
     init_method = "random"
 
@@ -175,8 +175,8 @@ def main() -> None:
     x_min, x_max = X_np[:, 0].min() - 0.5, X_np[:, 0].max() + 0.5
     y_min, y_max = X_np[:, 1].min() - 0.5, X_np[:, 1].max() + 0.5
     xx, yy = np.meshgrid(
-        np.linspace(x_min, x_max, 10), 
-        np.linspace(y_min, y_max, 10)
+        np.linspace(x_min, x_max, 20), 
+        np.linspace(y_min, y_max, 20)
     ) 
     
     # GMM Contours
