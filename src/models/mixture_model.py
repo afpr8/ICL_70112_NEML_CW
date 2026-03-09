@@ -83,6 +83,7 @@ class LANDMixtureModel:
         )
         # Convert the resulting JAX array back to a list of arrays
         C = list(C_stacked)
+        Vs = list(v_samples)
 
         t = 0
         loss_diff = float("inf")
@@ -147,7 +148,7 @@ class LANDMixtureModel:
                         A[k],
                         sigma[k],
                         C[k],
-                        v_samples,
+                        Vs[k],
                         r[:, k],
                         N_k,
                         subkey,
