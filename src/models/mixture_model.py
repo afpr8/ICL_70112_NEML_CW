@@ -90,12 +90,14 @@ class LANDMixtureModel:
         )
         N = X.shape[0]
 
+        print("Initializing parameters...")
         self.key, subkey = jax.random.split(self.key)
         mu, A, sigma = self._init_params(
             X, key=subkey, method=self.init_method, manifold=manifold
         )
         pi = jnp.ones(self.K) / self.K
 
+        self.key, subkey = jax.random.split(self.key)
         C = []
         Vs = []
         for k in range(self.K):
@@ -105,8 +107,7 @@ class LANDMixtureModel:
             )
             C.append(c_val)
             Vs.append(v_s)
-        
-        
+
         t = 0
         loss_diff = float("inf")
         prev_loss = float("inf")
@@ -206,15 +207,14 @@ class LANDMixtureModel:
                     # update pi
                     pi = pi.at[k].set(N_k / N)
 
-                    C = []
-                    Vs = []
-                    for k in range(self.K):
-                        self.key, subkey = jax.random.split(self.key)
-                        c_val, v_s = manifold.compute_normalization_constant(
-                            mu[k], sigma[k], subkey, n_samples=self.S
-                        )
-                        C.append(c_val)
-                        Vs.append(v_s)
+                    # Update normalization constant
+                    self.key, subkey = jax.random.split(self.key)
+                    c_val, v_s = manifold.compute_normalization_constant(
+                        new_mu_k, new_sigma_k, subkey, n_samples=self.S
+                    )
+                    C[k] = c_val
+                    Vs[k] = v_s
+
                 t += 1
 
         return mu, sigma, C, pi
@@ -269,7 +269,7 @@ class LANDMixtureModel:
 
         elif method == "mean":
             sorted_data = jnp.sort(X, axis=0)
-            k_clusters = jnp.split(sorted_data, self.K)
+            k_clusters = jnp.array_split(sorted_data, self.K)
             means = [jnp.mean(cluster, axis=0) for cluster in k_clusters]
 
             # Find the data point closest to the euclidean means to ensure we start on the manifold
@@ -281,12 +281,31 @@ class LANDMixtureModel:
         else:
             raise ValueError(f"Invalid initialisation method: {method}")
 
-        A = []
-        sigma = []
+        mu = jnp.stack(mu)
 
+        # Precompute log maps and Riemannian distances for all K components
+        all_tangent_vectors = []
+        all_dists = []
         for k in range(self.K):
             tangent_vectors = self._compute_log_maps(mu[k], X, manifold)
-            sig = jnp.cov(tangent_vectors.T)
+            all_tangent_vectors.append(tangent_vectors)
+
+            dist_sq = jnp.sum(tangent_vectors**2, axis=-1)
+            all_dists.append(dist_sq)
+        dists = jnp.stack(all_dists, axis=1)
+
+        # Assign each data point to the closest mean based on Riemannian distance
+        assignments = jnp.argmin(dists, axis=-1)
+
+        # Compute covariances using only the assigned points
+        A = []
+        sigma = []
+        for k in range(self.K):
+            tangent_vectors = all_tangent_vectors[k]
+
+            # 1.0 if datapoint is part of the cluster, 0 otherwise
+            weights = (assignments == k).astype(jnp.float32) + 1e-12
+            sig = jnp.cov(tangent_vectors.T, aweights=weights, bias=True)
 
             # Add a tiny ridge to the diagonal to ensure positive definiteness
             sig += jnp.eye(sig.shape[0]) * 1e-6
@@ -294,8 +313,7 @@ class LANDMixtureModel:
             sigma.append(sig)
             A.append(self.compute_A(sig))
 
-        # Stack the lists into proper JAX arrays before returning
-        return jnp.stack(mu), jnp.stack(A), jnp.stack(sigma)
+        return mu, jnp.stack(A), jnp.stack(sigma)
 
     def _compute_grads_k(
         self,
@@ -341,7 +359,7 @@ class LANDMixtureModel:
         def compute_m(v):
             translated_point = manifold.exp_map(mu, v)
             M_trans = manifold.metric(translated_point)
-            return jnp.sqrt(jnp.linalg.det(M_trans))
+            return jnp.exp(0.5 * jnp.sum(jnp.log(jnp.diag(M_trans))))
 
         m_values = jax.vmap(compute_m)(v_samples)
 
