@@ -110,9 +110,9 @@ def main() -> None:
     X_tensor = jnp.array(X_np, dtype=jnp.float32)
 
     # Define hyperparams matching the LAND setup
-    sigma, rho = 0.3, 1e-3
+    sigma, rho = 0.2, 1e-3
     K_segments = 10
-    init_method = "GMM"
+    init_method = "random"
 
     # Instantiate the shared manifold structure
     manifold = RiemannianManifold(X_tensor, sigma, rho, K_segments)

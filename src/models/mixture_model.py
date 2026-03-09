@@ -149,6 +149,7 @@ class LANDMixtureModel:
                 if loss_diff > 0:  
                     mu, A, sigma, pi, C, Vs = prevState.mu, prevState.A, prevState.sigma, prevState.pi, prevState.C, prevState.Vs
                     self.lr_A *= self.lr_scale_down
+                    loss_diff = 0.0 
                 else:
                     self.lr_A *= self.lr_scale_up
 
