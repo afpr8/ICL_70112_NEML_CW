@@ -208,20 +208,15 @@ class LANDMixtureModel:
             mu = [jnp.array(m, dtype=jnp.float32) for m in gmm.means_]
 
         elif method == "mean":
-            # Calculate the Euclidean empirical mean
-            euclidean_mean = jnp.mean(X, axis=0)
+            sorted_data = jnp.sort(X, axis=0)
+            k_clusters = jnp.split(sorted_data, self.K)
+            means = [jnp.mean(cluster, axis=0) for cluster in k_clusters]
 
-            # Find the data point closest to the euclidean mean to ensure we start on the manifold
-            closest_idx = jnp.argmin(jnp.sum((X - euclidean_mean) ** 2, axis=1))
-            manifold_mean = X[closest_idx]
-
-            # Add small random noise to break symmetry, starting from the guaranteed manifold point.
-            mu = []
-            for _ in range(self.K):
-                key, subkey = jax.random.split(key)
-                mu.append(
-                    manifold_mean + 0.1 * jax.random.normal(subkey, manifold_mean.shape)
-                )
+            # Find the data point closest to the euclidean means to ensure we start on the manifold
+            closest_idxs = [
+                jnp.argmin(jnp.sum((X - means[k]) ** 2, axis=1)) for k in range(self.K)
+            ]
+            mu = [X[idx].squeeze() for idx in closest_idxs]
 
         else:
             raise ValueError(f"Invalid initialisation method: {method}")
