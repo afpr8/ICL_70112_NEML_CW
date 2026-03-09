@@ -4,27 +4,19 @@ import jax
 import matplotlib.pyplot as plt
 from sklearn.datasets import make_moons
 from sklearn.mixture import GaussianMixture
-from functools import partial
 
 # Import your custom modules here
 from src.models.mixture_model import LANDMixtureModel
-from src.utils.land_utils import jax_log_map_shooting, jax_exp_map, jax_metric
+from src.utils.land_utils import (
+    RiemannianManifold,
+    compute_knn_initial_paths,
+)
 from src.utils.plotting_utils import plot_full_comparison
 
 
-def get_geodesic_path(mu, x, metric_fn, steps=10):
-    """
-    Computes a sequence of points along the geodesic from cluster mean (mu) to data point (x).
-    """
-    v = jax_log_map_shooting(mu, x, metric_fn)
-    path = []
-    # Interpolate from t=0 (at mu) to t=1 (at x)
-    for t in jnp.linspace(0, 1, steps):
-        point = jax_exp_map(mu, t * v, metric_fn)
-        path.append(np.array(point))
-    return np.array(path)
-
-def evaluate_land_density(X_grid, Y_grid, mu_list, sigma_list, C_list, pi_list, metric_fn):
+def evaluate_land_density(
+    X_grid, Y_grid, mu_list, sigma_list, C_list, pi_list, manifold
+):
     """
     Evaluates the LAND mixture model PDF over a 2D grid for contour plotting.
     """
@@ -33,41 +25,65 @@ def evaluate_land_density(X_grid, Y_grid, mu_list, sigma_list, C_list, pi_list, 
     Z = jnp.zeros(grid_tensor.shape[0])
     
     K = len(mu_list)
-    
-    # Calculate probability density for each grid point
+
     for k in range(K):
         inv_sigma = jnp.linalg.inv(sigma_list[k])
 
-        def compute_px(x):
-            lm = jax_log_map_shooting(mu_list[k], x, metric_fn)
+        # Compute initial KNN paths for the grid points
+        paths = compute_knn_initial_paths(
+            np.array(mu_list[k]),
+            np.array(grid_tensor),
+            manifold,
+            N_points=manifold.K_segments + 1,
+        )
+
+        log_maps = manifold.log_map_batch(mu_list[k], grid_tensor, jnp.array(paths))
+
+        def compute_density(lm):
             dist_sq = jnp.dot(lm, inv_sigma @ lm)
             return (1.0 / C_list[k]) * jnp.exp(-0.5 * dist_sq)
 
-        p_xs = jax.vmap(compute_px)(grid_tensor)
+        p_xs = jax.vmap(compute_density)(log_maps)
         Z += pi_list[k] * p_xs
 
     return np.array(Z).reshape(X_grid.shape)
+
 
 def main():
     # 1. Generate Non-Linear Data (Two Moons)
     X_np, true_labels = make_moons(n_samples=400, noise=0.1, random_state=42)
     X_tensor = jnp.array(X_np, dtype=jnp.float32)
-    
+
     # Define hyperparams matching the LAND setup
-    sigma, rho = 1.0, 1e-3
-    metric_fn = partial(jax_metric, X=X_tensor, sigma=sigma, rho=rho)
+    sigma, rho = 0.4, 1e-3
+    K_segments, n_neighbors = 5, 7
+
+    # Initialize the Riemannian Manifold
+    manifold = RiemannianManifold(
+        X_tensor, sigma=sigma, rho=rho, K_segments=K_segments, n_neighbors=n_neighbors
+    )
 
     # 2. Fit standard Gaussian Mixture Model
     print("Fitting GMM...")
-    gmm = GaussianMixture(n_components=2, covariance_type='full', random_state=42)
+    gmm = GaussianMixture(n_components=2, covariance_type="full", random_state=42)
     gmm.fit(X_np)
     gmm_means = gmm.means_
 
     # 3. Fit LAND Mixture Model
     print("Fitting LAND Mixture Model...")
-    land = LANDMixtureModel(K=2, lr_mu=1e-2, lr_A=1e-2, S=50, epsilon=1e-3, sigma=sigma, rho=rho)
+    land = LANDMixtureModel(
+        K=2,
+        lr_mu=1e-2,
+        lr_A=1e-2,
+        S=50,
+        epsilon=1e-3,
+        sigma=sigma,
+        rho=rho,
+        K_segments=K_segments,
+        n_neighbors=n_neighbors,
+    )
     land_mu, land_sigma, land_C, land_pi = land.fit(X_tensor)
-    
+
     # Convert LAND means to numpy for plotting
     land_means_np = np.array(jnp.stack(land_mu))
 
@@ -75,12 +91,21 @@ def main():
     print("Computing geodesics...")
     labels = []
     geodesics = []
-    
-    for x in X_tensor:
+
+    all_log_maps = []
+    for k in range(2):
+        paths = compute_knn_initial_paths(
+            np.array(land_mu[k]), np.array(X_tensor), manifold, N_points=K_segments + 1
+        )
+        all_log_maps.append(
+            manifold.log_map_batch(land_mu[k], X_tensor, jnp.array(paths))
+        )
+
+    for i, x in enumerate(X_tensor):
         # Determine which cluster 'x' belongs to by checking Mahalanobis distance on the manifold
         distances = []
         for k in range(2):
-            lm = jax_log_map_shooting(land_mu[k], x, metric_fn)
+            lm = all_log_maps[k][i]
             inv_sigma = jnp.linalg.inv(land_sigma[k])
             dist_sq = jnp.dot(lm, inv_sigma @ lm).item()
             distances.append(dist_sq)
@@ -89,8 +114,12 @@ def main():
         labels.append(best_cluster)
         
         # Generate the visual path
-        path = get_geodesic_path(land_mu[best_cluster], x, metric_fn)
-        geodesics.append(path)
+        lm_best = all_log_maps[best_cluster][i]
+        path = []
+        for t in jnp.linspace(0, 1, 10):
+            point = manifold.exp_map(land_mu[best_cluster], t * lm_best)
+            path.append(np.array(point))
+        geodesics.append(np.array(path))
 
     # 5. Generate Grid for Density Contours
     print("Evaluating grid densities...")
@@ -104,7 +133,9 @@ def main():
     Z_gmm = np.exp(gmm.score_samples(grid_points)).reshape(xx.shape)
     
     # LAND Contours
-    Z_land = evaluate_land_density(xx, yy, land_mu, land_sigma, land_C, land_pi, metric_fn)
+    Z_land = evaluate_land_density(
+        xx, yy, land_mu, land_sigma, land_C, land_pi, manifold
+    )
 
     # 6. Visualise
     print("Plotting results...")
@@ -121,6 +152,7 @@ def main():
     )
     
     plt.show()
+
 
 if __name__ == "__main__":
     main()
