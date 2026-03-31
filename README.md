@@ -1,7 +1,6 @@
 # Locally Adaptive Normal Distribution (LAND) - JAX Implementation
 
 [![JAX](https://img.shields.io/badge/JAX-Powered-blue.svg)](https://github.com/google/jax)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 This repository provides a highly scalable, GPU-accelerated implementation of the **Locally Adaptive Normal Distribution (LAND)** framework using **JAX**. This project addresses the computational bottlenecks of manifold density estimation by utilizing modern hardware and algorithmic optimizations.
 
